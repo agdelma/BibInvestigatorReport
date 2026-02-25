@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: Smoke test (help)
+        run: |
+          bib-investigator-report --help
+          bibreport --help
+      - name: Smoke test (example, no LaTeX compile)
+        run: |
+          python -m bib_investigator_report                 examples/sample.bib                 examples/investigators.csv                 --start-date 2020-01-01                 --end-date 2022-12-31                 --out examples/output/report.tex
+      - name: Lint (optional)
+        run: |
+          python -m pip install -e ".[dev]"
+          ruff check .

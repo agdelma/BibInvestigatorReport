@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""bibreport
+
+Small wrapper script so you can run the tool from:
+
+  1) a source checkout (this repo) via:  ./bin/bibreport ...
+  2) an installed environment (pip) as an installed script
+
+When executed from a repo checkout using the "src/" layout, this script adds
+"src/" to sys.path so the package can be imported without an editable install.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+def _maybe_add_src_to_path() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    src_dir = repo_root / "src"
+    pkg_dir = src_dir / "bib_investigator_report"
+    if pkg_dir.exists() and str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+
+
+def main() -> None:
+    _maybe_add_src_to_path()
+    from bib_investigator_report.cli import main_cli
+
+    main_cli()
+
+
+if __name__ == "__main__":
+    main()
