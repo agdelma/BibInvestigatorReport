@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import datetime as dt
 import re
 import shutil
@@ -58,6 +59,10 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+try:
+    from docx import Document
+except ImportError:
+    Document = None
 
 
 # ----------------------------
@@ -676,23 +681,37 @@ def generate_summary_longtable(
     inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
     entry_inv_count: Dict[str, int],
 ) -> str:
-    colspec = ["@{}l"] + ["l" for _ in periods] + ["@{}"]
-    colspec_str = "".join(colspec)
+    year_totals: List[int] = []
+    for p in periods:
+        keys: set[str] = set()
+        for per_map in inv_to_period_keys.values():
+            keys.update(per_map.get(p.index, []))
+        year_totals.append(len(keys))
+
+    investigator_col = r">{\raggedright\arraybackslash}p{1.2in}"
+    year_col = r">{\raggedright\arraybackslash}p{1.0in}"
+    colspec_str = "@{}" + investigator_col + "".join(year_col for _ in periods) + "@{}"
 
     lines: List[str] = []
     lines.append(r"\subsection*{Summary Table}")
     lines.append(r"\scriptsize")
     lines.append(r"\setlength{\LTpre}{0pt}")
     lines.append(r"\setlength{\LTpost}{0pt}")
-    lines.append(r"\renewcommand{\arraystretch}{1.5}")
-    lines.append(r"\setlength\tabcolsep{5pt}")
+    lines.append(r"\renewcommand{\arraystretch}{1.25}")
+    lines.append(r"\setlength\tabcolsep{4pt}")
 
     lines.append(rf"\begin{{longtable}}{{{colspec_str}}}")
     lines.append(r"\toprule")
-    header_cells = ["Investigator"] + [p.label for p in periods]
+    header_cells = ["Investigator"] + [f"{p.label} ({n})" for p, n in zip(periods, year_totals)]
     header_row = " & ".join(rf"\textbf{{{latex_escape(c)}}}" for c in header_cells) + r"\\"
     lines.append(header_row)
     lines.append(r"\midrule")
+    lines.append(r"\endfirsthead")
+
+    lines.append(r"\toprule")
+    lines.append(header_row)
+    lines.append(r"\midrule")
+    lines.append(r"\endhead")
 
     for inv_first, inv_last in investigators:
         inv_name = latex_escape(f"{inv_first} {inv_last}".strip())
@@ -702,7 +721,7 @@ def generate_summary_longtable(
             keys = per_map.get(p.index, [])
             year_suffix = suffix_for_year(p.index)
             cites = latex_citations_for_keys(keys=keys, year_suffix=year_suffix, entry_inv_count=entry_inv_count)
-            row_cells.append(cites)
+            row_cells.append(cites if cites else "")
         lines.append(" & ".join(row_cells) + r"\\")
 
     lines.append(r"\bottomrule")
@@ -822,6 +841,89 @@ def generate_tex(
 
     lines.append(r"\end{document}")
     return "\n".join(lines) + "\n"
+
+
+def _strip_tex_braces(s: str) -> str:
+    prev = None
+    while prev != s:
+        prev = s
+        s = s.replace("{", "").replace("}", "")
+    return s
+
+
+def _latex_to_plain_text(s: str) -> str:
+    """Best-effort cleanup of BibTeX-generated .bbl text for Word output."""
+    s = s.replace("\n", " ")
+    s = s.replace("~", " ")
+
+    s = re.sub(r"\\newblock\s*", " ", s)
+    s = re.sub(r"\\url\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\doi\{([^}]*)\}", r"DOI: \1", s)
+    s = re.sub(r"\\href\{[^}]*\}\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\emph\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\textit\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\textbf\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\textsc\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\enquote\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\[a-zA-Z]+\*?\s*", " ", s)
+
+    s = _strip_tex_braces(s)
+    s = s.replace("``", '"').replace("''", '"')
+    s = s.replace(r"\&", "&").replace(r"\%", "%").replace(r"\_", "_")
+    s = s.replace(r"\$", "$").replace(r"\#", "#")
+    s = html.unescape(s)
+    s = re.sub(r"\s+([,.;:])", r"\1", s)
+    s = re.sub(r"\(\s+", "(", s)
+    s = re.sub(r"\s+\)", ")", s)
+    s = re.sub(r"\s{2,}", " ", s)
+    return s.strip()
+
+
+def parse_bbl_file(path: Path) -> List[Tuple[str, str]]:
+    """Return [(bibkey, rendered_text), ...] from a BibTeX-generated .bbl file."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    entries: List[Tuple[str, str]] = []
+
+    pattern = re.compile(r"\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}")
+    matches = list(pattern.finditer(text))
+    for i, m in enumerate(matches):
+        key = m.group(1).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[start:end]
+        body = re.sub(r"\\end\{thebibliography\}.*$", "", body, flags=re.DOTALL)
+        rendered = _latex_to_plain_text(body)
+        if rendered:
+            entries.append((key, rendered))
+    return entries
+
+
+def write_docx_from_bbl(*, path: Path, periods: Sequence[Period], tex_dir: Path) -> None:
+    if Document is None:
+        raise RuntimeError("python-docx is not available. Install it with: pip install python-docx")
+
+    doc = Document()
+    doc.add_heading("Yearly Bibliographies", level=1)
+
+    for p in periods:
+        suffix = suffix_for_year(p.index)
+        bbl_path = tex_dir / f"{suffix}.bbl"
+        doc.add_heading(p.label, level=2)
+
+        if not bbl_path.exists():
+            doc.add_paragraph(f"Missing bibliography file: {bbl_path.name}")
+            continue
+
+        items = parse_bbl_file(bbl_path)
+        if not items:
+            doc.add_paragraph("None")
+            continue
+
+        for _, rendered in items:
+            doc.add_paragraph(rendered, style="List Number")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(path)
 
 
 # ----------------------------
@@ -970,6 +1072,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Compile to PDF with pdflatex + bibtex (multibib).",
     )
+    p.add_argument(
+        "--docx",
+        action="store_true",
+        help="Also write a .docx file containing only the rendered yearly bibliographies from the generated .bbl files.",
+    )
+    p.add_argument(
+        "--docx-out",
+        dest="docx_out",
+        type=Path,
+        default=None,
+        help="Optional path for .docx output (default: same stem as --out, with .docx suffix).",
+    )
 
     args = p.parse_args(argv)
 
@@ -1032,6 +1146,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.compile:
         year_suffixes = [suffix_for_year(p.index) for p in periods]
         compile_latex(out_tex, year_suffixes=year_suffixes, include_bibliography=not args.no_bibliography)
+
+    if args.docx:
+        if args.no_bibliography:
+            raise RuntimeError("--docx requires yearly bibliographies, so it cannot be used with --no-bibliography.")
+        if not args.compile:
+            raise RuntimeError("--docx from rendered .bbl files requires --compile so the .bbl files exist.")
+        docx_path = args.docx_out or out_tex.with_suffix(".docx")
+        write_docx_from_bbl(path=docx_path, periods=periods, tex_dir=out_tex.parent)
 
     return 0
 
