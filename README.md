@@ -69,6 +69,8 @@ bibreport INPUT.bib investigators.csv \
   [--summary-csv summary_pubs.csv] \
   [--date-field auto|date|date-added|year|...] \
   [--bibliography-style plain|unsrt|abbrv|...] \
+  [--add-support] \
+  [--annual-report] \
   [--no-bibliography] \
   [--compile]
 ```
@@ -95,6 +97,35 @@ BibTeX entries often only contain a `year`. In `--date-field auto` mode, the scr
 4. fallback to mid-year (`July 1`) for a bare `year`
 
 You can override inference with `--date-field <FIELDNAME>`.
+
+### Support-grouped reference list
+
+Add `--add-support` to replace the BibTeX-generated yearly bibliographies with a
+chronological reference list grouped by project-year period, then by `Full Support`
+and `Partial Support`.
+
+Use an optional `support` field in each BibTeX entry:
+
+```bibtex
+@article{example2024,
+  author={Smith, Alice and Doe, John},
+  title={An Example Paper},
+  journal={Journal of Examples},
+  year={2024},
+  support={partial},
+}
+```
+
+Supported values include `full` and `partial`; missing, blank, or unrecognized
+values are grouped as `Support Not Included`. Authors who match names in
+`investigators.csv` are bolded in the generated `.tex` references.
+
+Add `--annual-report` when you want bibliography entries without visible
+citation numbers, which makes the compiled PDF easier to copy/paste into a
+number-free publication list.
+
+When `--docx` is used, the LaTeX/BibTeX compile step is run automatically so the
+rendered `.bbl` bibliography files are available for Word export.
 
 ## Notes on LaTeX compilation
 
