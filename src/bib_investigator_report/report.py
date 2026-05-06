@@ -320,6 +320,9 @@ def parse_bibtex_file(path: Path) -> List[BibEntry]:
 def _strip_latex(s: str) -> str:
     if s is None:
         return ""
+    s = s.replace(r"\i", "i").replace(r"\j", "j")
+    s = re.sub(r"\\['`\"^~=.]\s*\{?([A-Za-z])\}?", r"\1", s)
+    s = re.sub(r"\\[uvHc]\s*\{([A-Za-z])\}", r"\1", s)
     s = re.sub(r"[{}]", "", s)
     s = re.sub(r"\\[A-Za-z]+", "", s)
     s = s.replace("~", " ")
@@ -519,12 +522,49 @@ def cite_command_for_suffix(suffix: str) -> str:
     return f"cite{suffix}"
 
 
+SUPPORT_FULL = "full"
+SUPPORT_PARTIAL = "partial"
+SUPPORT_NOT_INCLUDED = "not_included"
+SUPPORT_CATEGORIES = (SUPPORT_FULL, SUPPORT_PARTIAL, SUPPORT_NOT_INCLUDED)
+SUPPORT_LABELS = {
+    SUPPORT_FULL: "Full Support",
+    SUPPORT_PARTIAL: "Partial Support",
+    SUPPORT_NOT_INCLUDED: "Support Not Included",
+}
+SUPPORT_SUFFIX_PARTS = {
+    SUPPORT_FULL: "full",
+    SUPPORT_PARTIAL: "partial",
+    SUPPORT_NOT_INCLUDED: "nosupport",
+}
+
+
 def color_for_investigator_count(n: int) -> str:
     if n <= 1:
         return "black"
     if n == 2:
         return "blue"
     return "invOrange"
+
+
+def support_category_for_entry(entry: BibEntry) -> str:
+    """Return the support grouping for a BibTeX entry.
+
+    Use values such as support={full} or support={partial}. Missing or blank
+    support fields are grouped separately so they can be fixed in the source .bib.
+    """
+    if "support" not in entry.fields or not entry.get("support", "").strip():
+        return SUPPORT_NOT_INCLUDED
+    raw = entry.get("support", "")
+    normalized = re.sub(r"[^a-z]+", "", _strip_latex(raw).lower())
+    if normalized.startswith("partial") or "partialsupport" in normalized:
+        return SUPPORT_PARTIAL
+    if normalized.startswith("full") or "fullsupport" in normalized:
+        return SUPPORT_FULL
+    return SUPPORT_NOT_INCLUDED
+
+
+def suffix_for_support_category(year_index: int, support_category: str) -> str:
+    return f"{suffix_for_year(year_index)}{SUPPORT_SUFFIX_PARTS[support_category]}"
 
 
 def compute_assignments(
@@ -661,17 +701,152 @@ def latex_escape(s: str) -> str:
 def latex_citations_for_keys(
     *,
     keys: Sequence[str],
-    year_suffix: str,
+    year_index: int,
     entry_inv_count: Dict[str, int],
+    entries_by_key: Dict[str, BibEntry],
+    add_support: bool = False,
 ) -> str:
     if not keys:
         return ""
-    cite_cmd = cite_command_for_suffix(year_suffix)
     parts: List[str] = []
     for k in keys:
         c = color_for_investigator_count(entry_inv_count.get(k, 0))
-        parts.append(rf"\textcolor{{{c}}}{{\{cite_cmd}{{{k}}}}}")
+        if add_support:
+            entry = entries_by_key.get(k)
+            if entry is None:
+                support = SUPPORT_NOT_INCLUDED
+            else:
+                support = support_category_for_entry(entry)
+            cite_cmd = cite_command_for_suffix(suffix_for_support_category(year_index, support))
+            cite = rf"\{cite_cmd}{{{k}}}"
+        else:
+            cite_cmd = cite_command_for_suffix(suffix_for_year(year_index))
+            cite = rf"\{cite_cmd}{{{k}}}"
+        parts.append(rf"\textcolor{{{c}}}{{{cite}}}")
     return ", ".join(parts)
+
+
+def _format_author_for_reference(author: str) -> str:
+    author = author.strip()
+    if not author:
+        return ""
+    if "," not in author:
+        return author
+    last, first = _parse_author_name(author)
+    if first:
+        return f"{first} {last}".strip()
+    return last
+
+
+def _format_author_for_bibtex_with_bold(
+    author: str,
+    investigators: Sequence[Tuple[str, str]],
+) -> str:
+    if not any(author_matches_investigator(author, first, last) for first, last in investigators):
+        return author.strip()
+    name = _format_author_for_reference(author)
+    if not name:
+        return author.strip()
+    return rf"{{\textbf{{{name}}}}}"
+
+
+def write_bibtex_with_bold_investigators(
+    *,
+    path: Path,
+    entries: Sequence[BibEntry],
+    investigators: Sequence[Tuple[str, str]],
+) -> None:
+    lines: List[str] = []
+    for entry in entries:
+        lines.append(rf"@{entry.entry_type}{{{entry.key},")
+        for field, value in entry.fields.items():
+            out_value = value
+            if field == "author":
+                authors = re.split(r"\s+and\s+", value)
+                out_value = " and ".join(
+                    _format_author_for_bibtex_with_bold(author, investigators) for author in authors
+                )
+            lines.append(rf"  {field} = {{{out_value}}},")
+        lines.append("}")
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def build_support_period_groups(
+    *,
+    entries: Sequence[BibEntry],
+    periods: Sequence[Period],
+    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
+) -> Tuple[Dict[int, Dict[str, List[str]]], bool, bool]:
+    entries_by_key = {entry.key: entry for entry in entries}
+    period_grouped: Dict[int, Dict[str, List[str]]] = {
+        p.index: {category: [] for category in SUPPORT_CATEGORIES} for p in periods
+    }
+    included_keys: set[str] = set()
+    has_not_included = False
+
+    for p in periods:
+        period_keys: set[str] = set()
+        for per_map in inv_to_period_keys.values():
+            period_keys.update(per_map.get(p.index, []))
+        for key in period_keys:
+            entry = entries_by_key.get(key)
+            if entry is None:
+                continue
+            support = support_category_for_entry(entry)
+            if support == SUPPORT_NOT_INCLUDED:
+                has_not_included = True
+            period_grouped[p.index][support].append(key)
+            included_keys.add(key)
+
+    return period_grouped, bool(included_keys), has_not_included
+
+
+def generate_support_bibliography(
+    *,
+    entries: Sequence[BibEntry],
+    periods: Sequence[Period],
+    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
+    bib_base: str,
+    bibliography_style: str,
+) -> str:
+    period_grouped, has_included_keys, has_not_included = build_support_period_groups(
+        entries=entries,
+        periods=periods,
+        inv_to_period_keys=inv_to_period_keys,
+    )
+
+    lines: List[str] = []
+    lines.append(r"\newpage")
+    lines.append(r"\section*{Supported Publications}")
+    if not has_included_keys:
+        lines.append("None")
+        return "\n".join(lines)
+
+    support_categories = list(SUPPORT_CATEGORIES)
+    if not has_not_included:
+        support_categories.remove(SUPPORT_NOT_INCLUDED)
+
+    for p in periods:
+        period_end = p.end - dt.timedelta(days=1)
+        lines.append(r"\begin{center}")
+        period_label = f"{p.label}: {p.start.isoformat()} -- {period_end.isoformat()}"
+        lines.append(rf"\Large\textbf{{{period_label}}}")
+        lines.append(r"\end{center}")
+        for category in support_categories:
+            lines.append(r"\begin{center}")
+            lines.append(rf"\large\textbf{{{SUPPORT_LABELS[category]}}}")
+            lines.append(r"\end{center}")
+            keys = period_grouped[p.index].get(category, [])
+            if not keys:
+                lines.append(r"\noindent None")
+                lines.append("")
+                continue
+            suffix = suffix_for_support_category(p.index, category)
+            lines.append(rf"\bibliographystyle{suffix}{{{bibliography_style}}}")
+            lines.append(rf"\bibliography{suffix}{{{bib_base}}}")
+            lines.append("")
+    return "\n".join(lines)
 
 
 def generate_summary_longtable(
@@ -680,6 +855,8 @@ def generate_summary_longtable(
     periods: Sequence[Period],
     inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
     entry_inv_count: Dict[str, int],
+    entries_by_key: Dict[str, BibEntry],
+    add_support: bool,
 ) -> str:
     year_totals: List[int] = []
     for p in periods:
@@ -719,8 +896,13 @@ def generate_summary_longtable(
         row_cells: List[str] = [inv_name]
         for p in periods:
             keys = per_map.get(p.index, [])
-            year_suffix = suffix_for_year(p.index)
-            cites = latex_citations_for_keys(keys=keys, year_suffix=year_suffix, entry_inv_count=entry_inv_count)
+            cites = latex_citations_for_keys(
+                keys=keys,
+                year_index=p.index,
+                entry_inv_count=entry_inv_count,
+                entries_by_key=entries_by_key,
+                add_support=add_support,
+            )
             row_cells.append(cites if cites else "")
         lines.append(" & ".join(row_cells) + r"\\")
 
@@ -732,6 +914,7 @@ def generate_summary_longtable(
 
 def generate_tex(
     *,
+    entries: Sequence[BibEntry],
     investigators: Sequence[Tuple[str, str]],
     periods: Sequence[Period],
     start_date: dt.date,
@@ -742,8 +925,11 @@ def generate_tex(
     entry_inv_count: Dict[str, int],
     include_bibliography: bool,
     bibliography_style: str,
+    add_support: bool,
+    annual_report: bool,
 ) -> str:
     bib_base = Path(bib_resource_filename).stem
+    entries_by_key = {entry.key: entry for entry in entries}
 
     # Precompute total pubs per investigator (unique keys across all periods)
     inv_total: Dict[Tuple[str, str], int] = {}
@@ -785,12 +971,28 @@ def generate_tex(
 % -------------------------------------------------------------------------------   
 """)
     lines.append(r"\usepackage[numbers,sort&compress]{natbib}")
-    lines.append(r"\usepackage{multibib}")
+    if annual_report:
+        lines.append(r"\renewcommand{\bibnumfmt}[1]{}")
+        lines.append(r"\makeatletter")
+        lines.append(r"\renewcommand{\@biblabel}[1]{}")
+        lines.append(r"\makeatother")
+    if add_support:
+        lines.append(r"\usepackage{url}")
+        lines.append(r"\providecommand{\doi}[1]{DOI: #1}")
+        lines.append(r"\usepackage{multibib}")
+    else:
+        lines.append(r"\usepackage{multibib}")
 
-    # multibib declarations: one per year
-    for p in periods:
-        suffix = suffix_for_year(p.index)
-        lines.append(rf"\newcites{{{suffix}}}{{{p.label}}}")
+    # multibib declarations: one per year, or one per year/support bucket.
+    if add_support:
+        for p in periods:
+            for category in SUPPORT_CATEGORIES:
+                suffix = suffix_for_support_category(p.index, category)
+                lines.append(rf"\newcites{{{suffix}}}{{\phantom{{.}}}}")
+    else:
+        for p in periods:
+            suffix = suffix_for_year(p.index)
+            lines.append(rf"\newcites{{{suffix}}}{{{p.label}}}")
 
     lines.append("")
     lines.append(r"\begin{document}")
@@ -806,6 +1008,8 @@ def generate_tex(
         periods=periods,
         inv_to_period_keys=inv_to_period_keys,
         entry_inv_count=entry_inv_count,
+        entries_by_key=entries_by_key,
+        add_support=add_support,
     ))
     lines.append("")
 
@@ -819,8 +1023,13 @@ def generate_tex(
         per_map = inv_to_period_keys.get((inv_first, inv_last), {})
         for p in periods:
             keys = per_map.get(p.index, [])
-            suffix = suffix_for_year(p.index)
-            cites = latex_citations_for_keys(keys=keys, year_suffix=suffix, entry_inv_count=entry_inv_count)
+            cites = latex_citations_for_keys(
+                keys=keys,
+                year_index=p.index,
+                entry_inv_count=entry_inv_count,
+                entries_by_key=entries_by_key,
+                add_support=add_support,
+            )
             if not cites:
                 cites = "None"
             lines.append(rf"\item \textbf{{{p.label}:}} {cites}")
@@ -830,14 +1039,23 @@ def generate_tex(
 
     # Yearly bibliographies
     if include_bibliography:
-        lines.append(r"\newpage")
-        lines.append(r"\section*{Yearly Bibliographies}")
-        lines.append("")
-        for p in periods:
-            suffix = suffix_for_year(p.index)
-            lines.append(rf"\bibliographystyle{suffix}{{{bibliography_style}}}")
-            lines.append(rf"\bibliography{suffix}{{{bib_base}}}")
+        if add_support:
+            lines.append(generate_support_bibliography(
+                entries=entries,
+                periods=periods,
+                inv_to_period_keys=inv_to_period_keys,
+                bib_base=bib_base,
+                bibliography_style=bibliography_style,
+            ))
+        else:
+            lines.append(r"\newpage")
+            lines.append(r"\section*{Yearly Bibliographies}")
             lines.append("")
+            for p in periods:
+                suffix = suffix_for_year(p.index)
+                lines.append(rf"\bibliographystyle{suffix}{{{bibliography_style}}}")
+                lines.append(rf"\bibliography{suffix}{{{bib_base}}}")
+                lines.append("")
 
     lines.append(r"\end{document}")
     return "\n".join(lines) + "\n"
@@ -855,6 +1073,9 @@ def _latex_to_plain_text(s: str) -> str:
     """Best-effort cleanup of BibTeX-generated .bbl text for Word output."""
     s = s.replace("\n", " ")
     s = s.replace("~", " ")
+    s = s.replace(r"\i", "i").replace(r"\j", "j")
+    s = re.sub(r"\\['`\"^~=.]\s*\{?([A-Za-z])\}?", r"\1", s)
+    s = re.sub(r"\\[uvHc]\s*\{([A-Za-z])\}", r"\1", s)
 
     s = re.sub(r"\\newblock\s*", " ", s)
     s = re.sub(r"\\url\{([^}]*)\}", r"\1", s)
@@ -879,17 +1100,60 @@ def _latex_to_plain_text(s: str) -> str:
     return s.strip()
 
 
-def parse_bbl_file(path: Path) -> List[Tuple[str, str]]:
-    """Return [(bibkey, rendered_text), ...] from a BibTeX-generated .bbl file."""
-    text = path.read_text(encoding="utf-8", errors="replace")
-    entries: List[Tuple[str, str]] = []
+def _find_bibitem_key_end(text: str, start: int) -> Optional[Tuple[str, int]]:
+    i = start
+    n = len(text)
+    while i < n and text[i].isspace():
+        i += 1
 
-    pattern = re.compile(r"\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}")
-    matches = list(pattern.finditer(text))
-    for i, m in enumerate(matches):
-        key = m.group(1).strip()
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+    if i < n and text[i] == "[":
+        depth = 1
+        i += 1
+        while i < n and depth > 0:
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == "[":
+                depth += 1
+            elif text[i] == "]":
+                depth -= 1
+            i += 1
+        while i < n and text[i].isspace():
+            i += 1
+
+    if i >= n or text[i] != "{":
+        return None
+    depth = 1
+    key_start = i + 1
+    i += 1
+    while i < n and depth > 0:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[key_start:i].strip(), i + 1
+        i += 1
+    return None
+
+
+def parse_bbl_text(text: str) -> List[Tuple[str, str]]:
+    """Return [(bibkey, rendered_text), ...] from BibTeX-generated .bbl text."""
+    entries: List[Tuple[str, str]] = []
+    matches: List[Tuple[str, int, int]] = []
+    for m in re.finditer(r"\\bibitem\b", text):
+        parsed = _find_bibitem_key_end(text, m.end())
+        if parsed is None:
+            continue
+        key, body_start = parsed
+        matches.append((key, m.start(), body_start))
+
+    for i, (key, _item_start, body_start) in enumerate(matches):
+        end = matches[i + 1][1] if i + 1 < len(matches) else len(text)
+        start = body_start
         body = text[start:end]
         body = re.sub(r"\\end\{thebibliography\}.*$", "", body, flags=re.DOTALL)
         rendered = _latex_to_plain_text(body)
@@ -898,7 +1162,56 @@ def parse_bbl_file(path: Path) -> List[Tuple[str, str]]:
     return entries
 
 
-def write_docx_from_bbl(*, path: Path, periods: Sequence[Period], tex_dir: Path) -> None:
+def parse_bbl_file(path: Path) -> List[Tuple[str, str]]:
+    """Return [(bibkey, rendered_text), ...] from a BibTeX-generated .bbl file."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return parse_bbl_text(text)
+
+
+def _docx_add_bibliography_items(
+    doc: "Document",
+    items: Sequence[Tuple[str, str]],
+    *,
+    numbered: bool,
+) -> None:
+    if not items:
+        doc.add_paragraph("None")
+        return
+    style = "List Number" if numbered else None
+    for _, rendered in items:
+        doc.add_paragraph(rendered, style=style)
+
+
+def _docx_add_expected_bibliography_items(
+    doc: "Document",
+    items: Sequence[Tuple[str, str]],
+    expected_keys: Sequence[str],
+    *,
+    numbered: bool,
+) -> None:
+    if not expected_keys:
+        doc.add_paragraph("None")
+        return
+
+    expected = set(expected_keys)
+    filtered = [(key, rendered) for key, rendered in items if key in expected]
+    if not filtered and items:
+        filtered = list(items)
+
+    if filtered:
+        _docx_add_bibliography_items(doc, filtered, numbered=numbered)
+        return
+
+    doc.add_paragraph(f"Missing rendered bibliography entries: {', '.join(expected_keys)}")
+
+
+def write_docx_from_bbl(
+    *,
+    path: Path,
+    periods: Sequence[Period],
+    tex_dir: Path,
+    annual_report: bool,
+) -> None:
     if Document is None:
         raise RuntimeError("python-docx is not available. Install it with: pip install python-docx")
 
@@ -915,12 +1228,62 @@ def write_docx_from_bbl(*, path: Path, periods: Sequence[Period], tex_dir: Path)
             continue
 
         items = parse_bbl_file(bbl_path)
-        if not items:
-            doc.add_paragraph("None")
-            continue
+        _docx_add_bibliography_items(doc, items, numbered=not annual_report)
 
-        for _, rendered in items:
-            doc.add_paragraph(rendered, style="List Number")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(path)
+
+
+def write_support_docx_from_bbl(
+    *,
+    path: Path,
+    entries: Sequence[BibEntry],
+    periods: Sequence[Period],
+    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
+    tex_dir: Path,
+    annual_report: bool,
+) -> None:
+    if Document is None:
+        raise RuntimeError("python-docx is not available. Install it with: pip install python-docx")
+
+    period_grouped, has_included_keys, has_not_included = build_support_period_groups(
+        entries=entries,
+        periods=periods,
+        inv_to_period_keys=inv_to_period_keys,
+    )
+    support_categories = list(SUPPORT_CATEGORIES)
+    if not has_not_included:
+        support_categories.remove(SUPPORT_NOT_INCLUDED)
+
+    doc = Document()
+    doc.add_heading("Supported Publications", level=1)
+    if not has_included_keys:
+        doc.add_paragraph("None")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(path)
+        return
+
+    for p in periods:
+        period_end = p.end - dt.timedelta(days=1)
+        doc.add_heading(f"{p.label}: {p.start.isoformat()} -- {period_end.isoformat()}", level=2)
+        for category in support_categories:
+            doc.add_heading(SUPPORT_LABELS[category], level=3)
+            expected_keys = period_grouped[p.index].get(category, [])
+            if not expected_keys:
+                doc.add_paragraph("None")
+                continue
+            suffix = suffix_for_support_category(p.index, category)
+            bbl_path = tex_dir / f"{suffix}.bbl"
+            if not bbl_path.exists():
+                doc.add_paragraph(f"Missing bibliography file: {bbl_path.name}")
+                continue
+            items = parse_bbl_file(bbl_path)
+            _docx_add_expected_bibliography_items(
+                doc,
+                items,
+                expected_keys,
+                numbered=not annual_report,
+            )
 
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(path)
@@ -1068,6 +1431,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help=r"Do not include per-year bibliographies in the output TeX.",
     )
     p.add_argument(
+        "--add-support",
+        action="store_true",
+        help=(
+            "Use BibTeX support={full|partial} fields to generate a chronological "
+            "support-grouped reference list with investigator authors bolded."
+        ),
+    )
+    p.add_argument(
+        "--annual-report",
+        action="store_true",
+        help="Suppress bibliography citation numbers for easier copy/paste into annual reports.",
+    )
+    p.add_argument(
         "--compile",
         action="store_true",
         help="Compile to PDF with pdflatex + bibtex (multibib).",
@@ -1114,9 +1490,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     out_tex = args.out_tex
     out_tex.parent.mkdir(parents=True, exist_ok=True)
 
-    # Copy bib file next to TeX output for compilation portability.
-    bib_dest = out_tex.parent / args.bib.name
-    if args.bib.resolve() != bib_dest.resolve():
+    # Copy or render a BibTeX file next to TeX output for compilation portability.
+    if args.add_support:
+        bib_dest = out_tex.parent / f"{args.bib.stem}_support{args.bib.suffix}"
+    else:
+        bib_dest = out_tex.parent / args.bib.name
+    if args.add_support:
+        write_bibtex_with_bold_investigators(
+            path=bib_dest,
+            entries=entries,
+            investigators=investigators,
+        )
+    elif args.bib.resolve() != bib_dest.resolve():
         shutil.copy2(args.bib, bib_dest)
 
     # Write summary CSV
@@ -1130,6 +1515,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Write TeX
     tex = generate_tex(
+        entries=entries,
         investigators=investigators,
         periods=periods,
         start_date=start,
@@ -1140,20 +1526,48 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         entry_inv_count=entry_inv_count,
         include_bibliography=not args.no_bibliography,
         bibliography_style=args.bibliography_style,
+        add_support=args.add_support,
+        annual_report=args.annual_report,
     )
     out_tex.write_text(tex, encoding="utf-8")
 
-    if args.compile:
+    if args.docx and args.no_bibliography:
+        raise RuntimeError("--docx requires yearly bibliographies, so it cannot be used with --no-bibliography.")
+
+    if args.add_support:
+        year_suffixes = [
+            suffix_for_support_category(p.index, category)
+            for p in periods
+            for category in SUPPORT_CATEGORIES
+        ]
+    else:
         year_suffixes = [suffix_for_year(p.index) for p in periods]
-        compile_latex(out_tex, year_suffixes=year_suffixes, include_bibliography=not args.no_bibliography)
+
+    if args.compile or args.docx:
+        compile_latex(
+            out_tex,
+            year_suffixes=year_suffixes,
+            include_bibliography=not args.no_bibliography,
+        )
 
     if args.docx:
-        if args.no_bibliography:
-            raise RuntimeError("--docx requires yearly bibliographies, so it cannot be used with --no-bibliography.")
-        if not args.compile:
-            raise RuntimeError("--docx from rendered .bbl files requires --compile so the .bbl files exist.")
-        docx_path = args.docx_out or out_tex.with_suffix(".docx")
-        write_docx_from_bbl(path=docx_path, periods=periods, tex_dir=out_tex.parent)
+        if args.add_support:
+            docx_path = args.docx_out or out_tex.with_suffix(".docx")
+            write_support_docx_from_bbl(
+                path=docx_path,
+                entries=entries,
+                periods=periods,
+                inv_to_period_keys=inv_to_period_keys,
+                tex_dir=out_tex.parent,
+                annual_report=args.annual_report,
+            )
+        else:
+            docx_path = args.docx_out or out_tex.with_suffix(".docx")
+            write_docx_from_bbl(
+                path=docx_path,
+                periods=periods,
+                tex_dir=out_tex.parent,
+                annual_report=args.annual_report,
+            )
 
     return 0
-
