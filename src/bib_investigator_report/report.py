@@ -20,11 +20,12 @@ Inclusion logic:
     - the inferred entry date falls inside that project-year.
 
 Date inference:
-  BibTeX often has only a 'year'. This script tries, in order:
+  An explicit 'date-added' field is authoritative, even if other dates disagree.
+  If it is empty or unparseable, the entry is omitted with a diagnostic.
+  Only when 'date-added' is absent, this script tries, in order:
     1) 'date' field (ISO formats: YYYY, YYYY-MM, YYYY-MM-DD)
     2) 'year' + 'month' fields
-    3) 'date-added' field (common in Zotero exports)
-    4) fallback: mid-year (July 1) for the given 'year'
+    3) fallback: mid-year (July 1) for the given 'year'
 
 You can force a particular field via --date-field.
 
@@ -49,16 +50,20 @@ from __future__ import annotations
 
 import argparse
 import csv
-import html
 import datetime as dt
+import html
 import re
 import shutil
 import subprocess
 import sys
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+
+from .cleanup import cleanup_latex_artifacts, collect_latex_suffixes
+
 try:
     from docx import Document
 except ImportError:
@@ -70,43 +75,44 @@ except ImportError:
 # ----------------------------
 
 
-def parse_iso_date(s: str) -> Optional[dt.date]:
+def parse_iso_date(s: str) -> dt.date | None:
     """Parse YYYY, YYYY-MM, or YYYY-MM-DD into a date.
 
     - YYYY -> July 1 of that year
     - YYYY-MM -> 15th of that month
     - YYYY-MM-DD -> exact
+    - Invalid calendar dates or timestamps -> None
     """
     s = s.strip()
     if not s:
         return None
     s = s.replace("/", "-")
+    # BibDesk/Zotero exports may include a time and timezone. Reporting uses
+    # the written calendar date, without shifting it to a different timezone.
+    timestamp = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2})[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+        r"(?:\s*(?:Z|UTC|GMT|[+-]\d{2}:?\d{2}))?",
+        s,
+    )
+    if timestamp:
+        # Normalize export timezone spellings for Python 3.9's ISO parser.
+        value = re.sub(r"\s*(?:Z|UTC|GMT)$", "+00:00", s)
+        value = re.sub(r"\s+([+-]\d{2}:?\d{2})$", r"\1", value)
+        value = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", value)
+        try:
+            return dt.datetime.fromisoformat(value).date()
+        except ValueError:
+            return None
 
-    m = re.fullmatch(r"(\d{4})", s)
+    m = re.fullmatch(r"(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?", s)
     if m:
         y = int(m.group(1))
-        return dt.date(y, 7, 1)
-
-    m = re.fullmatch(r"(\d{4})-(\d{1,2})", s)
-    if m:
-        y, mo = int(m.group(1)), int(m.group(2))
-        mo = max(1, min(12, mo))
-        return dt.date(y, mo, 15)
-
-    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
-    if m:
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        d = max(1, min(31, d))
+        mo = int(m.group(2)) if m.group(2) is not None else 7
+        d = int(m.group(3)) if m.group(3) is not None else (15 if m.group(2) else 1)
         try:
             return dt.date(y, mo, d)
         except ValueError:
-            # Clamp (e.g. Feb 30 -> Feb 28)
-            while d > 1:
-                d -= 1
-                try:
-                    return dt.date(y, mo, d)
-                except ValueError:
-                    continue
+            return None
     return None
 
 
@@ -129,8 +135,8 @@ class Period:
         return f"Year {self.index:02d}"
 
 
-def build_periods(start: dt.date, end_inclusive: dt.date) -> List[Period]:
-    periods: List[Period] = []
+def build_periods(start: dt.date, end_inclusive: dt.date) -> list[Period]:
+    periods: list[Period] = []
     idx = 1
     cur = start
     end_exclusive = end_inclusive + dt.timedelta(days=1)
@@ -147,10 +153,10 @@ def build_periods(start: dt.date, end_inclusive: dt.date) -> List[Period]:
 # ----------------------------
 
 
-def _split_top_level(s: str, sep: str = ",") -> List[str]:
+def _split_top_level(s: str, sep: str = ",") -> list[str]:
     """Split on sep at brace depth 0 and outside quotes."""
-    parts: List[str] = []
-    buf: List[str] = []
+    parts: list[str] = []
+    buf: list[str] = []
     depth = 0
     in_quotes = False
     escape = False
@@ -164,22 +170,21 @@ def _split_top_level(s: str, sep: str = ",") -> List[str]:
             buf.append(ch)
             escape = True
             continue
-        if ch == '"':
+        if ch == '"' and depth == 0:
             in_quotes = not in_quotes
             buf.append(ch)
             continue
 
-        if not in_quotes:
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth = max(0, depth - 1)
-            if ch == sep and depth == 0:
-                part = "".join(buf).strip()
-                if part:
-                    parts.append(part)
-                buf = []
-                continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        if ch == sep and depth == 0 and not in_quotes:
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            continue
 
         buf.append(ch)
 
@@ -193,7 +198,9 @@ def _strip_enclosing(value: str) -> str:
     value = value.strip()
     if value.endswith(","):
         value = value[:-1].rstrip()
-    if len(value) >= 2 and ((value[0] == "{" and value[-1] == "}") or (value[0] == '"' and value[-1] == '"')):
+    if len(value) >= 2 and (
+        (value[0] == "{" and value[-1] == "}") or (value[0] == '"' and value[-1] == '"')
+    ):
         value = value[1:-1].strip()
     return value
 
@@ -202,11 +209,20 @@ def _strip_enclosing(value: str) -> str:
 class BibEntry:
     key: str
     entry_type: str
-    fields: Dict[str, str]
+    fields: dict[str, str]
     raw: str
 
     def get(self, field: str, default: str = "") -> str:
         return self.fields.get(field.lower(), default)
+
+
+@dataclass
+class BibParseDiagnostics:
+    """Account for source records, including records that cannot be returned."""
+
+    total_records: int = 0
+    skipped_records: list[tuple[str, str]] = dataclass_field(default_factory=list)
+    warnings: list[tuple[str, str]] = dataclass_field(default_factory=list)
 
 
 def _print_bib_error(msg: str, raw: str) -> None:
@@ -217,97 +233,118 @@ def _print_bib_error(msg: str, raw: str) -> None:
     sys.stderr.write("=" * 88 + "\n")
 
 
-def parse_bibtex_file(path: Path) -> List[BibEntry]:
+def _bibtex_entry_end(text: str, opening: int, *, comment: bool = False) -> int | None:
+    """Find the closing delimiter, respecting braced and quoted field values."""
+    closing = "}" if text[opening] == "{" else ")"
+    depth = 0
+    in_quotes = False
+    escape = False
+    for index in range(opening + 1, len(text)):
+        char = text[index]
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+        elif char == '"' and depth == 0 and not comment:
+            in_quotes = not in_quotes
+        elif char == "{":
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+        elif char == closing and depth == 0 and not in_quotes:
+            return index + 1
+    return None
+
+
+def parse_bibtex_file(
+    path: Path, *, diagnostics: BibParseDiagnostics | None = None
+) -> list[BibEntry]:
     """Parse a BibTeX file into entries.
 
-    Failure mode:
-      If a specific record cannot be parsed, it is printed to stderr and skipped.
+    Malformed and duplicate records are counted and skipped. BibTeX directives
+    (comment, preamble, string) are not bibliography records. Duplicate fields
+    retain the first value, matching BibTeX's behavior.
     """
     text = path.read_text(encoding="utf-8", errors="replace")
-    n = len(text)
+    diagnostics = diagnostics if diagnostics is not None else BibParseDiagnostics()
+    header = re.compile(r"@\s*([A-Za-z][A-Za-z0-9_-]*)\s*([({])")
+    recovery_header = re.compile(r"^[ \t]*@\s*[A-Za-z][A-Za-z0-9_-]*\s*[({]", re.MULTILINE)
     i = 0
+    entries: list[BibEntry] = []
+    seen_keys = set()
 
-    entries: List[BibEntry] = []
-
-    while True:
-        at = text.find("@", i)
-        if at == -1:
+    while i < len(text):
+        match = header.search(text, i)
+        if match is None:
             break
-
-        # Parse entry type
-        j = at + 1
-        while j < n and text[j].isspace():
-            j += 1
-        k = j
-        while k < n and (text[k].isalnum() or text[k] in ["_", "-"]):
-            k += 1
-        entry_type = text[j:k].strip().lower()
-
-        # Find opening brace/paren
-        while k < n and text[k].isspace():
-            k += 1
-        if k >= n or text[k] not in "{(":
-            i = at + 1
+        at = match.start()
+        # Ignore whole-line percent comments that contain entry-like examples.
+        line_start = text.rfind("\n", 0, at) + 1
+        if text[line_start:at].lstrip().startswith("%"):
+            newline = text.find("\n", at)
+            i = len(text) if newline == -1 else newline + 1
             continue
-        open_ch = text[k]
-        close_ch = "}" if open_ch == "{" else ")"
-        k += 1
-
-        # Find key (up to first comma)
-        comma = text.find(",", k)
-        if comma == -1:
-            raw = text[at: min(n, at + 2000)]
-            _print_bib_error("BibTeX parse error: could not find key comma.", raw)
-            break
-        key = text[k:comma].strip()
-
-        # Find end of entry by matching braces
-        depth = 1
-        m = comma + 1
-        in_quotes = False
-        escape = False
-        while m < n and depth > 0:
-            ch = text[m]
-            if escape:
-                escape = False
-            else:
-                if ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_quotes = not in_quotes
-                elif not in_quotes:
-                    if ch == open_ch:
-                        depth += 1
-                    elif ch == close_ch:
-                        depth -= 1
-            m += 1
-
-        if depth != 0:
-            raw = text[at: min(n, at + 4000)]
-            _print_bib_error("BibTeX parse error: unmatched braces/parentheses; skipping record.", raw)
-            i = at + 1
+        entry_type = match.group(1).lower()
+        opening = match.end() - 1
+        is_directive = entry_type in {"comment", "preamble", "string"}
+        end = _bibtex_entry_end(text, opening, comment=entry_type == "comment")
+        if end is None:
+            following = recovery_header.search(text, match.end())
+            i = following.start() if following is not None else len(text)
+        else:
+            i = end
+        raw_entry = text[at:i]
+        if is_directive:
+            if end is None:
+                _print_bib_error(
+                    f"BibTeX parse error: unterminated @{entry_type} directive.", raw_entry
+                )
             continue
 
-        raw_entry = text[at:m]
-        body = text[comma + 1 : m - 1].strip()
-
+        diagnostics.total_records += 1
+        content = text[opening + 1:i - 1] if end is not None else text[opening + 1:i]
+        key_part, separator, body = content.partition(",")
+        key = key_part.strip()
+        line_number = text.count("\n", 0, at) + 1
+        valid_key = key and not re.search(r"[\s{}()=]", key)
+        key_label = key if valid_key else f"<record at line {line_number}>"
         try:
-            fields: Dict[str, str] = {}
+            if end is None:
+                raise ValueError("unmatched braces/parentheses or unterminated quoted value")
+            if not separator:
+                raise ValueError("could not find key comma")
+            if not key:
+                raise ValueError("empty citation key")
+            if key != key_label:
+                raise ValueError("invalid citation key")
+            if key in seen_keys:
+                raise ValueError("duplicate citation key; keeping the first record")
+
+            fields: dict[str, str] = {}
             for part in _split_top_level(body, sep=","):
                 if "=" not in part:
-                    continue
+                    raise ValueError(f"field is missing '=': {part!r}")
                 name, val = part.split("=", 1)
                 name = name.strip().lower()
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", name):
+                    raise ValueError(f"invalid field name: {name!r}")
+                if not val.strip():
+                    raise ValueError(f"field {name!r} has no value")
                 val = _strip_enclosing(val)
-                fields[name] = val
-            if not key:
-                _print_bib_error("BibTeX parse warning: empty key; skipping record.", raw_entry)
-            else:
-                entries.append(BibEntry(key=key, entry_type=entry_type, fields=fields, raw=raw_entry))
+                if name in fields:
+                    diagnostics.warnings.append((
+                        key,
+                        f"duplicate field {name!r}; keeping first value {fields[name]!r}, "
+                        f"ignoring {val!r}",
+                    ))
+                else:
+                    fields[name] = val
+            entries.append(BibEntry(key=key, entry_type=entry_type, fields=fields, raw=raw_entry))
+            seen_keys.add(key)
         except Exception as ex:
-            _print_bib_error(f"BibTeX parse error for record (key={key!r}): {ex}", raw_entry)
-
-        i = m
+            diagnostics.skipped_records.append((key_label, str(ex)))
+            _print_bib_error(f"BibTeX parse error for record (key={key_label!r}): {ex}", raw_entry)
 
     return entries
 
@@ -338,7 +375,7 @@ def _normalize_for_compare(s: str) -> str:
     return s
 
 
-def _normalize_tokens(s: str) -> List[str]:
+def _normalize_tokens(s: str) -> list[str]:
     s = _strip_latex(s)
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -347,7 +384,7 @@ def _normalize_tokens(s: str) -> List[str]:
     return [t.lower() for t in s.split() if t.strip()]
 
 
-def _parse_author_name(author: str) -> Tuple[str, str]:
+def _parse_author_name(author: str) -> tuple[str, str]:
     author = author.strip()
     if not author:
         return "", ""
@@ -390,12 +427,14 @@ def author_matches_investigator(author: str, inv_first: str, inv_last: str) -> b
     return False
 
 
-def entry_investigators(entry: BibEntry, investigators: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def entry_investigators(
+    entry: BibEntry, investigators: Sequence[tuple[str, str]]
+) -> list[tuple[str, str]]:
     author_field = entry.get("author", "")
     if not author_field:
         return []
     authors = re.split(r"\s+and\s+", author_field)
-    matches: List[Tuple[str, str]] = []
+    matches: list[tuple[str, str]] = []
     for inv_first, inv_last in investigators:
         for a in authors:
             if author_matches_investigator(a, inv_first, inv_last):
@@ -404,7 +443,7 @@ def entry_investigators(entry: BibEntry, investigators: Sequence[Tuple[str, str]
     return matches
 
 
-def sort_investigators(investigators: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def sort_investigators(investigators: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
     return sorted(
         investigators,
         key=lambda inv: (_normalize_for_compare(inv[1]), _normalize_for_compare(inv[0])),
@@ -416,10 +455,13 @@ def sort_investigators(investigators: Sequence[Tuple[str, str]]) -> List[Tuple[s
 # ----------------------------
 
 
-def guess_entry_date(entry: BibEntry, *, date_field: str = "auto") -> Optional[dt.date]:
+def infer_entry_date(
+    entry: BibEntry, *, date_field: str = "auto"
+) -> tuple[dt.date | None, str]:
+    """Infer a date and identify the fields that supplied it."""
     df = date_field.lower()
 
-    def get_by_field(field: str) -> Optional[dt.date]:
+    def get_by_field(field: str) -> dt.date | None:
         v = entry.get(field, "")
         if not v:
             return None
@@ -427,10 +469,15 @@ def guess_entry_date(entry: BibEntry, *, date_field: str = "auto") -> Optional[d
 
     if df != "auto":
         d = get_by_field(df)
-        return d
+        return d, df
 
-    # auto preference list
-    for field in ["date", "year-month", "date-added", "year"]:
+    # Presence is authoritative: do not silently substitute publication dates
+    # when an explicitly supplied date-added is empty or cannot be parsed.
+    if "date-added" in entry.fields:
+        return get_by_field("date-added"), "date-added"
+
+    # Fallbacks apply only when date-added is absent.
+    for field in ["date", "year-month", "year"]:
         if field == "year-month":
             y = entry.get("year", "").strip()
             mo = entry.get("month", "").strip()
@@ -462,24 +509,31 @@ def guess_entry_date(entry: BibEntry, *, date_field: str = "auto") -> Optional[d
                     "dec": 12,
                     "december": 12,
                 }
-                mo_i: Optional[int]
+                mo_i: int | None
                 try:
-                    mo_i = int(re.sub(r"\D", "", mo_norm)) if re.search(r"\d", mo_norm) else month_map.get(mo_norm)
+                    mo_i = (
+                        int(re.sub(r"\D", "", mo_norm))
+                        if re.search(r"\d", mo_norm) else month_map.get(mo_norm)
+                    )
                 except ValueError:
                     mo_i = None
                 if mo_i and y.isdigit():
-                    return dt.date(int(y), mo_i, 15)
+                    return dt.date(int(y), mo_i, 15), "year + month"
             continue
 
         d = get_by_field(field)
         if d is not None:
-            return d
+            return d, field
 
     y = entry.get("year", "").strip()
     if y.isdigit():
-        return dt.date(int(y), 7, 1)
+        return dt.date(int(y), 7, 1), "year"
 
-    return None
+    return None, df
+
+
+def guess_entry_date(entry: BibEntry, *, date_field: str = "auto") -> dt.date | None:
+    return infer_entry_date(entry, date_field=date_field)[0]
 
 
 # ----------------------------
@@ -570,16 +624,16 @@ def suffix_for_support_category(year_index: int, support_category: str) -> str:
 def compute_assignments(
     *,
     entries: Sequence[BibEntry],
-    investigators: Sequence[Tuple[str, str]],
+    investigators: Sequence[tuple[str, str]],
     periods: Sequence[Period],
     start_date: dt.date,
     end_date: dt.date,
     date_field: str,
-) -> Tuple[
-    Dict[str, dt.date],
-    Dict[str, List[Tuple[str, str]]],
-    Dict[str, int],
-    Dict[Tuple[str, str], Dict[int, List[str]]],
+) -> tuple[
+    dict[str, dt.date],
+    dict[str, list[tuple[str, str]]],
+    dict[str, int],
+    dict[tuple[str, str], dict[int, list[str]]],
 ]:
     """Compute mapping from investigators to period -> bib keys.
 
@@ -590,9 +644,9 @@ def compute_assignments(
       inv_to_period_keys: inv -> period_index -> list of keys
     """
 
-    entry_dates: Dict[str, dt.date] = {}
-    entry_inv_matches: Dict[str, List[Tuple[str, str]]] = {}
-    entry_inv_count: Dict[str, int] = {}
+    entry_dates: dict[str, dt.date] = {}
+    entry_inv_matches: dict[str, list[tuple[str, str]]] = {}
+    entry_inv_count: dict[str, int] = {}
 
     for e in entries:
         try:
@@ -611,7 +665,7 @@ def compute_assignments(
             entry_inv_matches[e.key] = []
             entry_inv_count[e.key] = 0
 
-    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]] = {
+    inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]] = {
         inv: {p.index: [] for p in periods} for inv in investigators
     }
 
@@ -623,7 +677,7 @@ def compute_assignments(
             if d < start_date or d > end_date:
                 continue
 
-            period_idx: Optional[int] = None
+            period_idx: int | None = None
             for p in periods:
                 if p.start <= d < p.end:
                     period_idx = p.index
@@ -640,11 +694,65 @@ def compute_assignments(
             continue
 
     # sort within each cell: date desc, then key
-    for inv, per_map in inv_to_period_keys.items():
-        for idx, keys in per_map.items():
+    for _inv, per_map in inv_to_period_keys.items():
+        for _idx, keys in per_map.items():
             keys.sort(key=lambda k: (entry_dates.get(k, dt.date.min), k), reverse=True)
 
     return entry_dates, entry_inv_matches, entry_inv_count, inv_to_period_keys
+
+
+def included_bib_keys(inv_to_period_keys) -> set[str]:
+    return {
+        key
+        for per_map in inv_to_period_keys.values()
+        for keys in per_map.values()
+        for key in keys
+    }
+
+
+def print_report_diagnostics(
+    *, entries, diagnostics, entry_dates, entry_inv_matches, inv_to_period_keys,
+    start_date: dt.date, end_date: dt.date, date_field: str,
+) -> None:
+    """Account for every input record, counting shared publications only once."""
+    included = included_bib_keys(inv_to_period_keys)
+    print(
+        f"BibTeX records: {diagnostics.total_records} "
+        f"(parsed: {len(entries)}; skipped: {len(diagnostics.skipped_records)})"
+    )
+    print(f"Included in report: {len(included)} unique records")
+    print(f"Not included in report: {diagnostics.total_records - len(included)} records")
+    for key, reason in diagnostics.skipped_records:
+        print(f"  - {key}: {reason}")
+    for entry in entries:
+        if entry.key in included:
+            continue
+        reasons = []
+        date = entry_dates.get(entry.key)
+        if date is None:
+            if date_field.lower() == "auto" and "date-added" in entry.fields:
+                reasons.append(
+                    f"no usable authoritative date-added value {entry.get('date-added')!r}; "
+                    "other date fields ignored"
+                )
+            else:
+                reasons.append(f"no usable date (--date-field={date_field})")
+        elif not start_date <= date <= end_date:
+            _, source = infer_entry_date(entry, date_field=date_field)
+            values = ", ".join(f"{field}={entry.get(field)!r}" for field in source.split(" + "))
+            reasons.append(
+                f"inferred date {date.isoformat()} from {source} ({values}) is outside "
+                f"{start_date.isoformat()} through {end_date.isoformat()}"
+            )
+        if not entry_inv_matches.get(entry.key):
+            reasons.append("no matching investigators in author field")
+        if not reasons:
+            reasons.append("not assigned to a project-year")
+        print(f"  - {entry.key}: {'; '.join(reasons)}")
+    if diagnostics.warnings:
+        print("BibTeX warnings:")
+        for key, reason in diagnostics.warnings:
+            print(f"  - {key}: {reason}")
 
 
 # ----------------------------
@@ -655,9 +763,9 @@ def compute_assignments(
 def write_summary_csv(
     *,
     path: Path,
-    investigators: Sequence[Tuple[str, str]],
+    investigators: Sequence[tuple[str, str]],
     periods: Sequence[Period],
-    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
+    inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     header = ["Investigator"] + [p.label for p in periods]
@@ -702,13 +810,13 @@ def latex_citations_for_keys(
     *,
     keys: Sequence[str],
     year_index: int,
-    entry_inv_count: Dict[str, int],
-    entries_by_key: Dict[str, BibEntry],
+    entry_inv_count: dict[str, int],
+    entries_by_key: dict[str, BibEntry],
     add_support: bool = False,
 ) -> str:
     if not keys:
         return ""
-    parts: List[str] = []
+    parts: list[str] = []
     for k in keys:
         c = color_for_investigator_count(entry_inv_count.get(k, 0))
         if add_support:
@@ -740,7 +848,7 @@ def _format_author_for_reference(author: str) -> str:
 
 def _format_author_for_bibtex_with_bold(
     author: str,
-    investigators: Sequence[Tuple[str, str]],
+    investigators: Sequence[tuple[str, str]],
 ) -> str:
     if not any(author_matches_investigator(author, first, last) for first, last in investigators):
         return author.strip()
@@ -754,9 +862,9 @@ def write_bibtex_with_bold_investigators(
     *,
     path: Path,
     entries: Sequence[BibEntry],
-    investigators: Sequence[Tuple[str, str]],
+    investigators: Sequence[tuple[str, str]],
 ) -> None:
-    lines: List[str] = []
+    lines: list[str] = []
     for entry in entries:
         lines.append(rf"@{entry.entry_type}{{{entry.key},")
         for field, value in entry.fields.items():
@@ -776,10 +884,10 @@ def build_support_period_groups(
     *,
     entries: Sequence[BibEntry],
     periods: Sequence[Period],
-    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
-) -> Tuple[Dict[int, Dict[str, List[str]]], bool, bool]:
+    inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]],
+) -> tuple[dict[int, dict[str, list[str]]], bool, bool]:
     entries_by_key = {entry.key: entry for entry in entries}
-    period_grouped: Dict[int, Dict[str, List[str]]] = {
+    period_grouped: dict[int, dict[str, list[str]]] = {
         p.index: {category: [] for category in SUPPORT_CATEGORIES} for p in periods
     }
     included_keys: set[str] = set()
@@ -806,7 +914,7 @@ def generate_support_bibliography(
     *,
     entries: Sequence[BibEntry],
     periods: Sequence[Period],
-    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
+    inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]],
     bib_base: str,
     bibliography_style: str,
 ) -> str:
@@ -816,7 +924,7 @@ def generate_support_bibliography(
         inv_to_period_keys=inv_to_period_keys,
     )
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(r"\newpage")
     lines.append(r"\section*{Supported Publications}")
     if not has_included_keys:
@@ -851,14 +959,14 @@ def generate_support_bibliography(
 
 def generate_summary_longtable(
     *,
-    investigators: Sequence[Tuple[str, str]],
+    investigators: Sequence[tuple[str, str]],
     periods: Sequence[Period],
-    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
-    entry_inv_count: Dict[str, int],
-    entries_by_key: Dict[str, BibEntry],
+    inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]],
+    entry_inv_count: dict[str, int],
+    entries_by_key: dict[str, BibEntry],
     add_support: bool,
 ) -> str:
-    year_totals: List[int] = []
+    year_totals: list[int] = []
     for p in periods:
         keys: set[str] = set()
         for per_map in inv_to_period_keys.values():
@@ -869,7 +977,7 @@ def generate_summary_longtable(
     year_col = r">{\raggedright\arraybackslash}p{1.0in}"
     colspec_str = "@{}" + investigator_col + "".join(year_col for _ in periods) + "@{}"
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(r"\subsection*{Summary Table}")
     lines.append(r"\scriptsize")
     lines.append(r"\setlength{\LTpre}{0pt}")
@@ -893,7 +1001,7 @@ def generate_summary_longtable(
     for inv_first, inv_last in investigators:
         inv_name = latex_escape(f"{inv_first} {inv_last}".strip())
         per_map = inv_to_period_keys.get((inv_first, inv_last), {})
-        row_cells: List[str] = [inv_name]
+        row_cells: list[str] = [inv_name]
         for p in periods:
             keys = per_map.get(p.index, [])
             cites = latex_citations_for_keys(
@@ -915,14 +1023,14 @@ def generate_summary_longtable(
 def generate_tex(
     *,
     entries: Sequence[BibEntry],
-    investigators: Sequence[Tuple[str, str]],
+    investigators: Sequence[tuple[str, str]],
     periods: Sequence[Period],
     start_date: dt.date,
     end_date: dt.date,
     bib_resource_filename: str,
-    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
-    entry_dates: Dict[str, dt.date],
-    entry_inv_count: Dict[str, int],
+    inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]],
+    entry_dates: dict[str, dt.date],
+    entry_inv_count: dict[str, int],
     include_bibliography: bool,
     bibliography_style: str,
     add_support: bool,
@@ -932,7 +1040,7 @@ def generate_tex(
     entries_by_key = {entry.key: entry for entry in entries}
 
     # Precompute total pubs per investigator (unique keys across all periods)
-    inv_total: Dict[Tuple[str, str], int] = {}
+    inv_total: dict[tuple[str, str], int] = {}
     for inv in investigators:
         per_map = inv_to_period_keys.get(inv, {})
         s: set[str] = set()
@@ -941,7 +1049,7 @@ def generate_tex(
         inv_total[inv] = len(s)
 
     # Preamble
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(r"\documentclass[11pt]{article}")
     lines.append(r"\usepackage[margin=1in]{geometry}")
     lines.append(r"\usepackage[hidelinks]{hyperref}")
@@ -998,8 +1106,13 @@ def generate_tex(
     lines.append(r"\begin{document}")
     lines.append("")
     lines.append(r"\section*{IRG1 Investigator Publications by Project Year}")
-    lines.append(rf"\noindent Project date range: {start_date.isoformat()} $\to$ {end_date.isoformat()}\\")
-    lines.append(r"\noindent Citation colors: black = 1 investigator on the paper, \textcolor{blue}{blue = 2}, \textcolor{invOrange}{orange = 3+}.")
+    lines.append(
+        rf"\noindent Project date range: {start_date.isoformat()} $\to$ {end_date.isoformat()}\\"
+    )
+    lines.append(
+        r"\noindent Citation colors: black = 1 investigator on the paper, "
+        r"\textcolor{blue}{blue = 2}, \textcolor{invOrange}{orange = 3+}."
+    )
     lines.append("")
 
     # Summary table at top
@@ -1100,7 +1213,7 @@ def _latex_to_plain_text(s: str) -> str:
     return s.strip()
 
 
-def _find_bibitem_key_end(text: str, start: int) -> Optional[Tuple[str, int]]:
+def _find_bibitem_key_end(text: str, start: int) -> tuple[str, int] | None:
     i = start
     n = len(text)
     while i < n and text[i].isspace():
@@ -1140,10 +1253,10 @@ def _find_bibitem_key_end(text: str, start: int) -> Optional[Tuple[str, int]]:
     return None
 
 
-def parse_bbl_text(text: str) -> List[Tuple[str, str]]:
+def parse_bbl_text(text: str) -> list[tuple[str, str]]:
     """Return [(bibkey, rendered_text), ...] from BibTeX-generated .bbl text."""
-    entries: List[Tuple[str, str]] = []
-    matches: List[Tuple[str, int, int]] = []
+    entries: list[tuple[str, str]] = []
+    matches: list[tuple[str, int, int]] = []
     for m in re.finditer(r"\\bibitem\b", text):
         parsed = _find_bibitem_key_end(text, m.end())
         if parsed is None:
@@ -1162,15 +1275,15 @@ def parse_bbl_text(text: str) -> List[Tuple[str, str]]:
     return entries
 
 
-def parse_bbl_file(path: Path) -> List[Tuple[str, str]]:
+def parse_bbl_file(path: Path) -> list[tuple[str, str]]:
     """Return [(bibkey, rendered_text), ...] from a BibTeX-generated .bbl file."""
     text = path.read_text(encoding="utf-8", errors="replace")
     return parse_bbl_text(text)
 
 
 def _docx_add_bibliography_items(
-    doc: "Document",
-    items: Sequence[Tuple[str, str]],
+    doc: Document,
+    items: Sequence[tuple[str, str]],
     *,
     numbered: bool,
 ) -> None:
@@ -1183,8 +1296,8 @@ def _docx_add_bibliography_items(
 
 
 def _docx_add_expected_bibliography_items(
-    doc: "Document",
-    items: Sequence[Tuple[str, str]],
+    doc: Document,
+    items: Sequence[tuple[str, str]],
     expected_keys: Sequence[str],
     *,
     numbered: bool,
@@ -1239,7 +1352,7 @@ def write_support_docx_from_bbl(
     path: Path,
     entries: Sequence[BibEntry],
     periods: Sequence[Period],
-    inv_to_period_keys: Dict[Tuple[str, str], Dict[int, List[str]]],
+    inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]],
     tex_dir: Path,
     annual_report: bool,
 ) -> None:
@@ -1294,13 +1407,16 @@ def write_support_docx_from_bbl(
 # ----------------------------
 
 
-def compile_latex(tex_path: Path, *, year_suffixes: Sequence[str], include_bibliography: bool) -> None:
+def compile_latex(
+    tex_path: Path, *, year_suffixes: Sequence[str], include_bibliography: bool
+) -> None:
     """Compile LaTeX using pdflatex + bibtex (multibib) + pdflatex twice."""
     workdir = tex_path.parent
 
     bibtex_exe = shutil.which("bibtex")
     if bibtex_exe is None:
-        # In some environments (including some minimal TeXLive installs), the bibtex symlink can be missing.
+        # In some environments (including minimal TeXLive installs),
+        # the bibtex symlink can be missing.
         bibtex_exe = shutil.which("bibtex.original") or "bibtex.original"
 
     # Clean old auxiliary and bibliography artifacts for deterministic builds
@@ -1353,12 +1469,31 @@ def compile_latex(tex_path: Path, *, year_suffixes: Sequence[str], include_bibli
     run(["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tex_path.name])
 
 
+def verify_rendered_bibliographies(
+    tex_path: Path, *, year_suffixes: Sequence[str], expected_keys: set[str]
+) -> None:
+    """Fail visibly if BibTeX did not render a selected publication."""
+    rendered = set()
+    for suffix in year_suffixes:
+        bbl_path = tex_path.parent / f"{suffix}.bbl"
+        if bbl_path.exists():
+            rendered.update(key for key, _ in parse_bbl_file(bbl_path))
+    missing = expected_keys - rendered
+    if missing:
+        raise RuntimeError(
+            "Selected records missing from compiled bibliographies: "
+            + ", ".join(sorted(missing))
+            + ". LaTeX intermediate files have been retained for inspection."
+        )
+    print(f"Compiled bibliography: all {len(expected_keys)} selected records found")
+
+
 # ----------------------------
 # CLI
 # ----------------------------
 
 
-def load_investigators(csv_path: Path) -> List[Tuple[str, str]]:
+def load_investigators(csv_path: Path) -> list[tuple[str, str]]:
     """Load investigators from CSV.
 
     Required columns (case-insensitive):
@@ -1375,18 +1510,24 @@ def load_investigators(csv_path: Path) -> List[Tuple[str, str]]:
         headers = [h.strip() for h in reader.fieldnames]
         header_map = {h.lower().strip(): h for h in headers}
 
-        def find_col(candidates: Sequence[str]) -> Optional[str]:
+        def find_col(candidates: Sequence[str]) -> str | None:
             for c in candidates:
                 if c in header_map:
                     return header_map[c]
             return None
 
-        first_col = find_col(["firstname", "first", "given", "givenname", "first_name", "given_name"])
-        last_col = find_col(["lastname", "last", "family", "familyname", "surname", "last_name", "family_name"])
+        first_col = find_col(
+            ["firstname", "first", "given", "givenname", "first_name", "given_name"]
+        )
+        last_col = find_col(
+            ["lastname", "last", "family", "familyname", "surname", "last_name", "family_name"]
+        )
         if not first_col or not last_col:
-            raise ValueError(f"Investigators CSV must contain first/last name columns. Found: {headers}")
+            raise ValueError(
+                f"Investigators CSV must contain first/last name columns. Found: {headers}"
+            )
 
-        out: List[Tuple[str, str]] = []
+        out: list[tuple[str, str]] = []
         for row in reader:
             first = (row.get(first_col) or "").strip()
             last = (row.get(last_col) or "").strip()
@@ -1396,15 +1537,19 @@ def load_investigators(csv_path: Path) -> List[Tuple[str, str]]:
         return out
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="Generate a LaTeX report of citations per investigator per project-year (multibib)."
+        description=(
+            "Generate a LaTeX report of citations per investigator per project-year (multibib)."
+        )
     )
     p.add_argument("bib", type=Path, help="Input .bib file")
     p.add_argument("investigators", type=Path, help="Investigators CSV")
     p.add_argument("--start-date", required=True, help="YYYY-MM-DD")
     p.add_argument("--end-date", required=True, help="YYYY-MM-DD")
-    p.add_argument("--out", dest="out_tex", type=Path, default=Path("report.tex"), help="Output .tex file")
+    p.add_argument(
+        "--out", dest="out_tex", type=Path, default=Path("report.tex"), help="Output .tex file"
+    )
     p.add_argument(
         "--summary-csv",
         dest="summary_csv",
@@ -1416,7 +1561,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--date-field",
         default="auto",
         help=(
-            "Which BibTeX field to use for dates: auto (default), date, date-added, year, month, etc. "
+            "Which BibTeX field to use for dates: "
+            "auto (default), date, date-added, year, month, etc. "
+            "In auto mode, date-added is authoritative when present. "
             "If not auto, no fallback is used."
         ),
     )
@@ -1449,9 +1596,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Compile to PDF with pdflatex + bibtex (multibib).",
     )
     p.add_argument(
+        "--clean",
+        action="store_true",
+        help=(
+            "Remove this report's LaTeX intermediate files after successful compilation "
+            "and optional Word export (requires --compile or --docx)."
+        ),
+    )
+    p.add_argument(
         "--docx",
         action="store_true",
-        help="Also write a .docx file containing only the rendered yearly bibliographies from the generated .bbl files.",
+        help=(
+            "Also write a .docx file containing only the rendered yearly bibliographies "
+            "from the generated .bbl files."
+        ),
     )
     p.add_argument(
         "--docx-out",
@@ -1462,6 +1620,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     args = p.parse_args(argv)
+    if args.clean and not (args.compile or args.docx):
+        p.error("--clean requires --compile or --docx")
+    if args.docx and args.no_bibliography:
+        p.error("--docx cannot be used with --no-bibliography")
 
     start = parse_iso_date(args.start_date)
     end = parse_iso_date(args.end_date)
@@ -1475,7 +1637,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("No investigators found in CSV")
     investigators = sort_investigators(investigators)
 
-    entries = parse_bibtex_file(args.bib)
+    diagnostics = BibParseDiagnostics()
+    entries = parse_bibtex_file(args.bib, diagnostics=diagnostics)
     periods = build_periods(start, end)
 
     entry_dates, entry_inv_matches, entry_inv_count, inv_to_period_keys = compute_assignments(
@@ -1486,8 +1649,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         end_date=end,
         date_field=args.date_field,
     )
+    print_report_diagnostics(
+        entries=entries,
+        diagnostics=diagnostics,
+        entry_dates=entry_dates,
+        entry_inv_matches=entry_inv_matches,
+        inv_to_period_keys=inv_to_period_keys,
+        start_date=start,
+        end_date=end,
+        date_field=args.date_field,
+    )
 
     out_tex = args.out_tex
+    previous_year_suffixes = collect_latex_suffixes(out_tex) if args.clean else []
     out_tex.parent.mkdir(parents=True, exist_ok=True)
 
     # Copy or render a BibTeX file next to TeX output for compilation portability.
@@ -1531,9 +1705,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     out_tex.write_text(tex, encoding="utf-8")
 
-    if args.docx and args.no_bibliography:
-        raise RuntimeError("--docx requires yearly bibliographies, so it cannot be used with --no-bibliography.")
-
     if args.add_support:
         year_suffixes = [
             suffix_for_support_category(p.index, category)
@@ -1549,6 +1720,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             year_suffixes=year_suffixes,
             include_bibliography=not args.no_bibliography,
         )
+        if not args.no_bibliography:
+            verify_rendered_bibliographies(
+                out_tex,
+                year_suffixes=year_suffixes,
+                expected_keys=included_bib_keys(inv_to_period_keys),
+            )
 
     if args.docx:
         if args.add_support:
@@ -1569,5 +1746,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 tex_dir=out_tex.parent,
                 annual_report=args.annual_report,
             )
+
+    if args.clean:
+        removed = cleanup_latex_artifacts(
+            out_tex,
+            year_suffixes=year_suffixes,
+            previous_year_suffixes=previous_year_suffixes,
+        )
+        print(f"Cleaned {len(removed)} LaTeX intermediate files")
+
+    print(f"Wrote LaTeX: {out_tex}")
+    print(f"Wrote summary CSV: {summary_csv_path}")
+    if args.compile or args.docx:
+        print(f"Wrote PDF: {out_tex.with_suffix('.pdf')}")
+    if args.docx:
+        print(f"Wrote Word document: {docx_path}")
 
     return 0
