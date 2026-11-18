@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .colors import COLLABORATION_BLUE
+from .plotting import plot_font_family, plot_rc_params
 
 if TYPE_CHECKING:
     from .report import Period
@@ -143,6 +144,7 @@ def write_coauthor_network(
     investigators: Sequence[tuple[str, str]],
     periods: Sequence[Period],
     inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]],
+    plot_font: str = "default",
 ) -> None:
     """Render a single-page vector figure, retaining unconnected roster members."""
     try:
@@ -175,23 +177,27 @@ def write_coauthor_network(
         if isolated else isolates_top + 35
     )
     ink, muted, blue, rule = '#1C2D3C', '#52616E', COLLABORATION_BLUE, '#E4E9ED'
-    font = FontProperties(family='DejaVu Sans', size=8.5)
+    font = FontProperties(family=plot_font_family(plot_font), size=8.5)
 
     def text_width(value):
-        return TextPath((0, 0), value, prop=font).get_extents().width if value else 0
+        return TextPath((0, 0), value, prop=font, usetex=False).get_extents().width if value else 0
 
     positions = _positions(np, connected, data.edges)
     radius_scale = 18.5 / math.sqrt(max(data.node_totals, default=1) or 1)
     radii = {node: radius_scale * math.sqrt(data.node_totals[node]) for node in connected}
     labels = _place_labels(data, positions, radii, text_width)
-    with rc_context({'pdf.fonttype': 42, 'text.usetex': False}):
+    with rc_context(plot_rc_params(plot_font)):
         figure = Figure(figsize=(6.5, height / 72), facecolor='white')
         ax = figure.add_axes((0, 0, 1, 1))
         ax.set(xlim=(0, 468), ylim=(height, 0))
         ax.axis('off')
 
         def text(x, y, value, *, size=9, color=ink, **kwargs):
-            return ax.text(x, y, value, fontsize=size, fontfamily='DejaVu Sans',
+            family = plot_font_family(plot_font, bold=kwargs.get('fontweight') == 'bold')
+            if plot_font == 'computer-modern' and kwargs.get('fontweight') == 'bold':
+                # cmb10 is the bold face, but its font metadata uses normal weight.
+                kwargs['fontweight'] = 'normal'
+            return ax.text(x, y, value, fontsize=size, fontfamily=family,
                            color=color, va='center', **kwargs)
 
         text(4, 14,

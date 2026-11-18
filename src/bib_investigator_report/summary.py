@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .colors import COLLABORATION_BLUE
+from .plotting import plot_font_family, plot_rc_params
 
 if TYPE_CHECKING:
     from .report import Period
@@ -144,7 +145,7 @@ def _make_row_pages(data, investigators, column_indices, dots_per_line, text_wid
 
 def _draw_page(
     *, Figure, data, periods, investigators, entry_inv_count,
-    columns, rows, dots_per_line, page_number, page_count,
+    columns, rows, dots_per_line, page_number, page_count, plot_font,
 ):
     body_height = sum(row.height for row in rows)
     height = max(275, _BODY_TOP + body_height + _FOOTER_HEIGHT)
@@ -154,7 +155,11 @@ def _draw_page(
     ax.axis("off")
 
     def text(x, y, value, *, size=9, color=_INK, **kwargs):
-        return ax.text(x, y, value, fontsize=size, color=color, fontfamily="DejaVu Sans",
+        family = plot_font_family(plot_font, bold=kwargs.get("fontweight") == "bold")
+        if plot_font == "computer-modern" and kwargs.get("fontweight") == "bold":
+            # cmb10 is already a bold face, but its bundled metadata says normal.
+            kwargs["fontweight"] = "normal"
+        return ax.text(x, y, value, fontsize=size, color=color, fontfamily=family,
                        va="center", **kwargs)
 
     for x, value, label in (
@@ -262,6 +267,7 @@ def write_dot_summary(
     periods: Sequence[Period],
     inv_to_period_keys: dict[tuple[str, str], dict[int, list[str]]],
     entry_inv_count: dict[str, int],
+    plot_font: str = "default",
 ) -> int:
     """Write vector-PDF summary pages and return their count.
 
@@ -285,10 +291,10 @@ def write_dot_summary(
         investigators=investigators, periods=periods,
         inv_to_period_keys=inv_to_period_keys, entry_inv_count=entry_inv_count,
     )
-    font = FontProperties(family="DejaVu Sans", size=9)
+    font = FontProperties(family=plot_font_family(plot_font), size=9)
 
     def text_width(value):
-        return TextPath((0, 0), value, prop=font).get_extents().width if value else 0
+        return TextPath((0, 0), value, prop=font, usetex=False).get_extents().width if value else 0
 
     panels = []
     for first in range(0, max(1, len(periods)), _YEARS_PER_PAGE):
@@ -303,13 +309,14 @@ def write_dot_summary(
                                      delete=False) as temporary_file:
         temporary = Path(temporary_file.name)
     try:
-        with rc_context({"pdf.fonttype": 42, "text.usetex": False}), PdfPages(temporary) as pdf:
+        with rc_context(plot_rc_params(plot_font)), PdfPages(temporary) as pdf:
             for number, (columns, rows, dots_per_line) in enumerate(panels, 1):
                 figure = _draw_page(
                     Figure=Figure, data=data, periods=periods,
                     investigators=investigators, entry_inv_count=entry_inv_count,
                     columns=columns, rows=rows, dots_per_line=dots_per_line,
                     page_number=number, page_count=len(panels),
+                    plot_font=plot_font,
                 )
                 pdf.savefig(figure)
                 figure.clear()

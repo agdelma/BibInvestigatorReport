@@ -146,6 +146,7 @@ class NetworkCliTests(unittest.TestCase):
         with patch("builtins.__import__", side_effect=no_plotting), \
                 patch.object(report, "write_coauthor_network") as render:
             tex = self.run_main()
+            self.assertEqual(self.run_main("--plot-font", "computer-modern"), tex)
         render.assert_not_called()
         self.assertEqual(re.findall(r"\\section(\*?)\{([^{}]+)\}", tex), [
             ("", "Summary"), ("", "Per-Investigator Products"), ("*", "References"),
@@ -216,11 +217,25 @@ class NetworkCliTests(unittest.TestCase):
             self.run_main("--coauthor-network")
         kwargs = render.call_args.kwargs
         self.assertEqual(kwargs["path"], self.network_path)
+        self.assertEqual(kwargs["plot_font"], "default")
         included = {
             key for periods in kwargs["inv_to_period_keys"].values()
             for keys in periods.values() for key in keys
         }
         self.assertEqual(included, {"shared", "solo"})
+        self.assertEqual((self.directory / "summary_pubs.csv").read_bytes(), original_csv)
+
+    def test_plot_font_reaches_both_figures_without_changing_report_data(self):
+        self.run_main()
+        original_csv = (self.directory / "summary_pubs.csv").read_bytes()
+        with patch.object(
+            report, "write_coauthor_network", side_effect=self.fake_network,
+        ) as network, \
+                patch.object(report, "write_dot_summary", side_effect=self.fake_summary) as summary:
+            self.run_main("--coauthor-network", "--summary-style", "dots",
+                          "--plot-font", "computer-modern")
+        self.assertEqual(network.call_args.kwargs["plot_font"], "computer-modern")
+        self.assertEqual(summary.call_args.kwargs["plot_font"], "computer-modern")
         self.assertEqual((self.directory / "summary_pubs.csv").read_bytes(), original_csv)
 
     def test_no_bibliography_keeps_summary_and_products_sections(self):
@@ -250,6 +265,29 @@ class NetworkCliTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("matplotlib"), "requires optional plots dependency")
 class NetworkPdfTests(unittest.TestCase):
+    def test_font_choice_is_embedded_and_restores_matplotlib_settings(self):
+        import matplotlib as mpl
+
+        periods = report.build_periods(dt.date(2026, 1, 1), dt.date(2026, 12, 31))
+        investigators = [("Jane", "Doe"), ("John", "Roe"), ("Zero", "Papers")]
+        mapping = {investigators[0]: {1: ["shared"]}, investigators[1]: {1: ["shared"]}}
+        for selection, expected_fonts in (
+            ({}, (b"DejaVuSans", b"DejaVuSans-Bold")),
+            ({"plot_font": "computer-modern"}, (b"Cmr10", b"Cmb10")),
+        ):
+            with self.subTest(selection=selection), TemporaryDirectory() as temporary_dir, \
+                    mpl.rc_context({"text.usetex": True, "mathtext.fontset": "stix"}):
+                path = Path(temporary_dir) / "network.pdf"
+                network.write_coauthor_network(
+                    path=path, investigators=investigators, periods=periods,
+                    inv_to_period_keys=mapping, **selection,
+                )
+                pdf = path.read_bytes()
+                for font in expected_fonts:
+                    self.assertIn(font, pdf)
+                self.assertTrue(mpl.rcParams["text.usetex"])
+                self.assertEqual(mpl.rcParams["mathtext.fontset"], "stix")
+
     def test_isolated_nodes_fit_axes_and_do_not_overlap_across_rows(self):
         from matplotlib.backends.backend_pdf import PdfPages
         from matplotlib.patches import Circle

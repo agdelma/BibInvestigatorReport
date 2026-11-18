@@ -125,8 +125,10 @@ class SummaryCliTests(unittest.TestCase):
                 patch.object(report, "write_dot_summary") as render:
             default_tex = self.run_main()
             explicit_tex = self.run_main("--summary-style", "table")
+            cm_tex = self.run_main("--plot-font", "computer-modern")
         render.assert_not_called()
         self.assertEqual(default_tex, explicit_tex)
+        self.assertEqual(default_tex, cm_tex)
         self.assertIn(r"\begin{longtable}", default_tex)
         self.assertNotIn(r"\includegraphics", default_tex)
         self.assertFalse(self.summary_path.exists())
@@ -138,6 +140,7 @@ class SummaryCliTests(unittest.TestCase):
         with patch.object(report, "write_dot_summary", side_effect=self.fake_summary) as render:
             tex = self.run_main("--summary-style", "dots")
         self.assertEqual(render.call_args.kwargs["path"], self.summary_path)
+        self.assertEqual(render.call_args.kwargs["plot_font"], "default")
         self.assertEqual(tex.count(r"\includegraphics"), 2)
         self.assertIn("page=1", tex)
         self.assertIn("page=2", tex)
@@ -175,6 +178,34 @@ class SummaryCliTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("matplotlib"), "requires optional plots dependency")
 class SummaryPdfTests(unittest.TestCase):
+    def test_font_selection_is_embedded_without_changing_global_settings(self):
+        from matplotlib import rc_context, rcParams
+
+        investigators = [("Jane", "Doe")]
+        periods = report.build_periods(dt.date(2026, 1, 1), dt.date(2026, 12, 31))
+        for options, expected_fonts in (
+            ({}, (b"DejaVuSans", b"DejaVuSans-Bold")),
+            ({"plot_font": "computer-modern"}, (b"Cmr10", b"Cmb10")),
+            ({"plot_font": "default"}, (b"DejaVuSans", b"DejaVuSans-Bold")),
+        ):
+            with self.subTest(options=options), TemporaryDirectory() as temporary_dir, \
+                    rc_context({"text.usetex": True, "mathtext.fontset": "stix"}):
+                settings = ("font.family", "text.usetex", "mathtext.fontset", "pdf.fonttype")
+                before = {key: rcParams[key] for key in settings}
+                path = Path(temporary_dir) / "summary.pdf"
+                summary.write_dot_summary(
+                    path=path, investigators=investigators, periods=periods,
+                    inv_to_period_keys={investigators[0]: {1: ["paper"]}},
+                    entry_inv_count={"paper": 1}, **options,
+                )
+                self.assertEqual({key: rcParams[key] for key in settings}, before)
+                embedded_fonts = re.findall(rb"/BaseFont\s*/([^\s/]+)", path.read_bytes())
+                for expected in expected_fonts:
+                    self.assertTrue(any(name.endswith(expected) for name in embedded_fonts),
+                                    (expected, embedded_fonts))
+                if options.get("plot_font") == "computer-modern":
+                    self.assertFalse(any(b"DejaVuSans" in name for name in embedded_fonts))
+
     def render(self, investigators, periods, mapping, collaboration):
         with TemporaryDirectory() as temporary_dir:
             path = Path(temporary_dir) / "summary.pdf"

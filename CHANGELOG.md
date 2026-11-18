@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 - 2026-11-18
+- Added `--plot-font computer-modern` for dot-summary and co-authorship figures, including bold headings, using fonts bundled with Matplotlib
+- Kept DejaVu Sans as the default and preserved optional plotting dependencies
+- Measured labels using the selected font and kept font settings local to each render
+- Added regression coverage for CLI font selection, embedded PDF fonts, and unchanged Matplotlib settings
+
 ## 0.6.0 - 2026-11-18
 - Organized reports into Summary, Per-Investigator Products, and References, with investigator and bibliography groups as subsections
 - Added `--coauthor-network` to generate and include a weighted investigator co-authorship network in the summary

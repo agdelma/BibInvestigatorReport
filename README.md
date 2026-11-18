@@ -72,6 +72,7 @@ bibreport INPUT.bib investigators.csv \
   [--summary-csv summary_pubs.csv] \
   [--summary-style table|dots] \
   [--coauthor-network] \
+  [--plot-font default|computer-modern] \
   [--date-field auto|date|date-added|year|...] \
   [--bibliography-style plain|unsrt|abbrv|...] \
   [--add-support] \
@@ -123,6 +124,25 @@ summary PDF. Word export continues to contain only the bibliographies.
 
 Use `--summary-style table` for the original citation table. This remains the
 default and does not require Matplotlib.
+
+### Figure fonts
+
+Add `--plot-font computer-modern` to use Computer Modern in both the dot-summary
+and co-authorship figures, matching the default LaTeX report font more closely:
+
+```bash
+bibreport INPUT.bib investigators.csv \
+  --start-date 2023-05-01 --end-date 2026-11-30 \
+  --summary-style dots --coauthor-network --plot-font computer-modern --out report.tex
+```
+
+The default, `--plot-font default`, retains the existing DejaVu Sans appearance.
+Computer Modern's regular and bold fonts ship with Matplotlib, so this option
+requires no additional packages or LaTeX installation to generate the figures.
+On Matplotlib 3.6 and newer, characters absent from Computer Modern fall back to
+DejaVu Serif. The option only affects figures; table-only reports without a
+co-authorship network still require no plotting dependency. Compiling the report
+with `--compile` continues to require LaTeX.
 
 ### Co-authorship network
 

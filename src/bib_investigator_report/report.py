@@ -65,6 +65,7 @@ from pathlib import Path
 from .cleanup import cleanup_latex_artifacts, collect_latex_suffixes
 from .colors import COLLABORATION_BLUE
 from .network import write_coauthor_network
+from .plotting import PLOT_FONTS
 from .summary import write_dot_summary
 
 try:
@@ -1626,6 +1627,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     p.add_argument(
+        "--plot-font",
+        choices=PLOT_FONTS,
+        default="default",
+        help=(
+            "Font for dot-summary and co-authorship figures: default (DejaVu Sans) "
+            "or computer-modern (bundled fonts; no LaTeX required for plotting)."
+        ),
+    )
+    p.add_argument(
         "--date-field",
         default="auto",
         help=(
@@ -1765,6 +1775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             periods=periods,
             inv_to_period_keys=inv_to_period_keys,
             entry_inv_count=entry_inv_count,
+            plot_font=args.plot_font,
         )
 
     network_pdf = None
@@ -1775,6 +1786,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             investigators=investigators,
             periods=periods,
             inv_to_period_keys=inv_to_period_keys,
+            plot_font=args.plot_font,
         )
 
     # Write TeX

@@ -35,3 +35,16 @@ for the original citation table without the plotting dependency.
 Add `--coauthor-network` to either summary style to show shared-paper
 relationships among the sample investigators. This creates and includes
 `examples/output/report_coauthors.pdf` and also requires plotting support.
+
+To match the LaTeX report font more closely in both figures, add
+`--plot-font computer-modern`:
+
+```bash
+./bin/bibreport examples/sample.bib examples/investigators.csv \
+  --start-date 2020-01-01 --end-date 2022-12-31 \
+  --out examples/output/report.tex --summary-style dots --coauthor-network \
+  --plot-font computer-modern
+```
+
+This uses fonts bundled with Matplotlib and does not require LaTeX to generate
+the figures. Omit the option or use `--plot-font default` to keep DejaVu Sans.
