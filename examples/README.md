@@ -17,3 +17,17 @@ the repository root:
 
 The command prints record totals and lists any omitted keys with their reasons.
 `--clean` preserves the final PDF, TeX source, bibliography, and summary CSV.
+
+For a dot-matrix summary with yearly publication bars, install plotting support
+and select `dots`:
+
+```bash
+python -m pip install -e ".[plots]"
+./bin/bibreport examples/sample.bib examples/investigators.csv \
+  --start-date 2020-01-01 --end-date 2022-12-31 \
+  --out examples/output/report.tex --summary-style dots --compile --clean
+```
+
+This also creates `examples/output/report_summary.pdf`, which the `.tex` includes
+automatically and `--clean` preserves. Use `--summary-style table` (the default)
+for the original citation table without the plotting dependency.

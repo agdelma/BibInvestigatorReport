@@ -6,6 +6,7 @@ Generate a LaTeX report of BibTeX citations per investigator per project-year, p
 - Output:
   - a `.tex` report (organized by investigator and project-year)
   - `summary_pubs.csv` (investigators × years, with BibTeX keys per cell)
+  - an optional dot-matrix summary PDF, automatically included in the `.tex` report
   - optionally a compiled PDF (requires a LaTeX toolchain)
   - console diagnostics showing record totals and why any records were omitted
 
@@ -68,6 +69,7 @@ bibreport INPUT.bib investigators.csv \
   --end-date   YYYY-MM-DD \
   [--out report.tex] \
   [--summary-csv summary_pubs.csv] \
+  [--summary-style table|dots] \
   [--date-field auto|date|date-added|year|...] \
   [--bibliography-style plain|unsrt|abbrv|...] \
   [--add-support] \
@@ -82,6 +84,39 @@ bibreport INPUT.bib investigators.csv \
 
 - Year 01 is the 12-month period starting at `--start-date`
 - Year 02 is the next 12-month period, etc., until `--end-date`
+
+### Visual publication summary
+
+Use `--summary-style dots` to replace the opening citation table with a dot
+matrix and stacked yearly publication bars. Install the optional plotting
+dependency first (from a source checkout):
+
+```bash
+python -m pip install -e ".[plots]"
+```
+
+Then add the option to your usual command:
+
+```bash
+bibreport INPUT.bib investigators.csv \
+  --start-date 2023-05-01 --end-date 2026-11-30 \
+  --summary-style dots --out report.tex --compile
+```
+
+Each marker represents one paper. Marker color and shape distinguish papers
+with one, two, or three-or-more investigators from the supplied roster. Yearly
+bars and the overall paper total count shared papers once; a shared paper
+appears in every participating investigator's row. The individual investigator
+citation lists, bibliographies, and summary CSV are retained.
+
+The script writes `report_summary.pdf` next to `report.tex` and includes it
+automatically using LaTeX's `graphicx` package. The summary PDF is generated
+even without `--compile`; keep it alongside the `.tex` when moving the report.
+Large matrices continue across multiple summary pages. `--clean` preserves the
+summary PDF. Word export continues to contain only the bibliographies.
+
+Use `--summary-style table` for the original citation table. This remains the
+default and does not require Matplotlib.
 
 ### Inclusion logic
 
@@ -144,6 +179,12 @@ Use an optional `support` field in each BibTeX entry:
 Supported values include `full` and `partial`; missing, blank, or unrecognized
 values are grouped as `Support Not Included`. Authors who match names in
 `investigators.csv` are bolded in the generated `.tex` references.
+
+In the per-investigator publication lists, citation numbers for `support={full}`
+papers are underlined while retaining their collaboration colors. This applies
+with or without `--add-support`. Partial, blank, missing, or unrecognized support
+values keep their usual citation styling. The summary table and bibliography
+entries are not underlined.
 
 Add `--annual-report` when you want bibliography entries without visible
 citation numbers, which makes the compiled PDF easier to copy/paste into a

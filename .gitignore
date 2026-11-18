@@ -19,6 +19,9 @@ build/
 output/
 examples/output/
 
+# Local IRG1 publication data and generated reports
+/Publications/
+
 # LaTeX build artifacts
 *.aux
 *.bbl

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 - 2026-11-18
+- Added `--summary-style dots` for an automatically included vector PDF with a dot matrix, investigator totals, and yearly collaboration bars
+- Kept the original citation table as the default and as `--summary-style table`
+- Added the optional `plots` dependency for dot-matrix rendering
+- Underlined full-support citation numbers only in the per-investigator lists, preserving collaboration colors and other citation styles
+- Preserved individual citation lists and CSV output, with automatic pagination for larger matrices
+- Added regression coverage for shared-paper counts, optional plotting, and summary PDF integration
+
 ## 0.4.0 - 2026-11-17
 - Added console record totals and per-record omission reasons, including inferred dates and date sources
 - Added parser diagnostics for malformed records, duplicate keys, and duplicate fields; duplicate fields now use the first value consistently with BibTeX

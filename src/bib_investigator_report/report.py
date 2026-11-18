@@ -63,6 +63,7 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 
 from .cleanup import cleanup_latex_artifacts, collect_latex_suffixes
+from .summary import write_dot_summary
 
 try:
     from docx import Document
@@ -813,23 +814,23 @@ def latex_citations_for_keys(
     entry_inv_count: dict[str, int],
     entries_by_key: dict[str, BibEntry],
     add_support: bool = False,
+    highlight_full_support: bool = False,
 ) -> str:
     if not keys:
         return ""
     parts: list[str] = []
     for k in keys:
         c = color_for_investigator_count(entry_inv_count.get(k, 0))
+        entry = entries_by_key.get(k)
+        support = support_category_for_entry(entry) if entry is not None else SUPPORT_NOT_INCLUDED
         if add_support:
-            entry = entries_by_key.get(k)
-            if entry is None:
-                support = SUPPORT_NOT_INCLUDED
-            else:
-                support = support_category_for_entry(entry)
             cite_cmd = cite_command_for_suffix(suffix_for_support_category(year_index, support))
             cite = rf"\{cite_cmd}{{{k}}}"
         else:
             cite_cmd = cite_command_for_suffix(suffix_for_year(year_index))
             cite = rf"\{cite_cmd}{{{k}}}"
+        if highlight_full_support and support == SUPPORT_FULL:
+            cite = rf"\underline{{{cite}}}"
         parts.append(rf"\textcolor{{{c}}}{{{cite}}}")
     return ", ".join(parts)
 
@@ -1035,7 +1036,14 @@ def generate_tex(
     bibliography_style: str,
     add_support: bool,
     annual_report: bool,
+    summary_style: str = "table",
+    summary_filename: str | None = None,
+    summary_pages: int = 1,
 ) -> str:
+    if summary_style not in {"table", "dots"}:
+        raise ValueError(f"Unknown summary style: {summary_style}")
+    if summary_style == "dots" and (not summary_filename or summary_pages < 1):
+        raise ValueError("A dot summary requires a PDF filename and at least one page")
     bib_base = Path(bib_resource_filename).stem
     entries_by_key = {entry.key: entry for entry in entries}
 
@@ -1057,6 +1065,8 @@ def generate_tex(
     lines.append(r"\definecolor{invOrange}{RGB}{255,130,0}")
     lines.append(r"\usepackage{array}")
     lines.append(r"\usepackage{longtable}")
+    if summary_style == "dots":
+        lines.append(r"\usepackage{graphicx}")
     lines.append(r"""
 % -------------------------------------------------------------------------------   
 % Tables
@@ -1115,18 +1125,35 @@ def generate_tex(
     )
     lines.append("")
 
-    # Summary table at top
-    lines.append(generate_summary_longtable(
-        investigators=investigators,
-        periods=periods,
-        inv_to_period_keys=inv_to_period_keys,
-        entry_inv_count=entry_inv_count,
-        entries_by_key=entries_by_key,
-        add_support=add_support,
-    ))
+    # Summary at top; citations remain in the investigator sections in either mode.
+    if summary_style == "dots":
+        lines.append(r"\medskip")
+        for page in range(1, summary_pages + 1):
+            lines.append(
+                rf"\noindent\includegraphics[page={page},width=\linewidth,"
+                rf"height=0.78\textheight,keepaspectratio]{{\detokenize{{{summary_filename}}}}}"
+            )
+            lines.append(r"\clearpage")
+    else:
+        lines.append(generate_summary_longtable(
+            investigators=investigators,
+            periods=periods,
+            inv_to_period_keys=inv_to_period_keys,
+            entry_inv_count=entry_inv_count,
+            entries_by_key=entries_by_key,
+            add_support=add_support,
+        ))
     lines.append("")
 
     # Investigator sections
+    full_support_keys = {
+        entry.key for entry in entries if support_category_for_entry(entry) == SUPPORT_FULL
+    }
+    if full_support_keys & included_bib_keys(inv_to_period_keys):
+        lines.append(
+            r"\noindent Full-support papers have underlined citation numbers "
+            r"in the lists below.\par\smallskip"
+        )
     for inv_first, inv_last in investigators:
         inv_name = latex_escape(f"{inv_first} {inv_last}".strip())
         total = inv_total.get((inv_first, inv_last), 0)
@@ -1142,6 +1169,7 @@ def generate_tex(
                 entry_inv_count=entry_inv_count,
                 entries_by_key=entries_by_key,
                 add_support=add_support,
+                highlight_full_support=True,
             )
             if not cites:
                 cites = "None"
@@ -1558,6 +1586,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Optional path for summary CSV (default: summary_pubs.csv next to --out).",
     )
     p.add_argument(
+        "--summary-style",
+        choices=("table", "dots"),
+        default="table",
+        help=(
+            "Summary format: table (default) or a dot matrix with yearly publication bars. "
+            "Dots writes a companion PDF and requires the optional plots dependency."
+        ),
+    )
+    p.add_argument(
         "--date-field",
         default="auto",
         help=(
@@ -1687,6 +1724,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         inv_to_period_keys=inv_to_period_keys,
     )
 
+    summary_pdf = None
+    summary_pages = 1
+    if args.summary_style == "dots":
+        summary_pdf = out_tex.with_name(f"{out_tex.stem}_summary.pdf")
+        summary_pages = write_dot_summary(
+            path=summary_pdf,
+            investigators=investigators,
+            periods=periods,
+            inv_to_period_keys=inv_to_period_keys,
+            entry_inv_count=entry_inv_count,
+        )
+
     # Write TeX
     tex = generate_tex(
         entries=entries,
@@ -1702,6 +1751,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         bibliography_style=args.bibliography_style,
         add_support=args.add_support,
         annual_report=args.annual_report,
+        summary_style=args.summary_style,
+        summary_filename=summary_pdf.name if summary_pdf else None,
+        summary_pages=summary_pages,
     )
     out_tex.write_text(tex, encoding="utf-8")
 
@@ -1757,6 +1809,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"Wrote LaTeX: {out_tex}")
     print(f"Wrote summary CSV: {summary_csv_path}")
+    if summary_pdf is not None:
+        print(f"Wrote summary figure: {summary_pdf}")
     if args.compile or args.docx:
         print(f"Wrote PDF: {out_tex.with_suffix('.pdf')}")
     if args.docx:
