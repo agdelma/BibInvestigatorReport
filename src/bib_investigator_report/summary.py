@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .colors import COLLABORATION_BLUE
+
 if TYPE_CHECKING:
     from .report import Period
 
@@ -76,7 +78,7 @@ _BODY_TOP = 228.0
 _FOOTER_HEIGHT = 34.0
 _ROW_SPACE = _MAX_HEIGHT - _BODY_TOP - _FOOTER_HEIGHT
 _YEARS_PER_PAGE = 5
-_COLORS = ("#4F5965", "#3377B8", "#CB7725")
+_COLORS = ("#4F5965", COLLABORATION_BLUE, "#CB7725")
 _MARKERS = ("o", "D", "s")
 _INK, _MUTED, _RULE = "#1C2D3C", "#52616E", "#E4E9ED"
 

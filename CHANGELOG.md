@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 - 2026-11-18
+- Organized reports into Summary, Per-Investigator Products, and References, with investigator and bibliography groups as subsections
+- Added `--coauthor-network` to generate and include a weighted investigator co-authorship network in the summary
+- Matched two-investigator citation and legend colors to the blue used in the charts
+- Added regression coverage for co-authorship counts, isolated investigators, report structure, and consistent citation colors
+
 ## 0.5.0 - 2026-11-18
 - Added `--summary-style dots` for an automatically included vector PDF with a dot matrix, investigator totals, and yearly collaboration bars
 - Kept the original citation table as the default and as `--summary-style table`

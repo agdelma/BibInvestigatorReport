@@ -31,3 +31,7 @@ python -m pip install -e ".[plots]"
 This also creates `examples/output/report_summary.pdf`, which the `.tex` includes
 automatically and `--clean` preserves. Use `--summary-style table` (the default)
 for the original citation table without the plotting dependency.
+
+Add `--coauthor-network` to either summary style to show shared-paper
+relationships among the sample investigators. This creates and includes
+`examples/output/report_coauthors.pdf` and also requires plotting support.

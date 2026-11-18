@@ -26,7 +26,7 @@ class SupportCitationTests(unittest.TestCase):
             with self.subTest(add_support=add_support):
                 citations = self.render_citations(entries, add_support=add_support)
                 suffix = "onefull" if add_support else "one"
-                for key, color in zip(entries, ("black", "blue", "invOrange")):
+                for key, color in zip(entries, ("black", "invBlue", "invOrange")):
                     self.assertIn(
                         rf"\textcolor{{{color}}}{{\underline{{\cite{suffix}{{{key}}}}}}}",
                         citations,
@@ -64,7 +64,7 @@ class SupportCitationTests(unittest.TestCase):
             keys=[entry.key], year_index=1, entry_inv_count={entry.key: 2},
             entries_by_key={entry.key: entry},
         )
-        self.assertEqual(citations, r"\textcolor{blue}{\citeone{full}}")
+        self.assertEqual(citations, r"\textcolor{invBlue}{\citeone{full}}")
 
     def test_generated_reports_emphasize_only_full_support_in_investigator_lists(self):
         start, end = dt.date(2026, 1, 1), dt.date(2026, 12, 31)
@@ -89,9 +89,9 @@ class SupportCitationTests(unittest.TestCase):
                         annual_report=False, summary_style=style,
                         summary_filename="summary.pdf" if style == "dots" else None,
                     )
-                    prefix, investigator_section = tex.split(r"\section*{Jane Doe (3)}", 1)
+                    prefix, investigator_section = tex.split(r"\subsection*{Jane Doe (3)}", 1)
                     investigator_section, bibliography = investigator_section.split(
-                        r"\newpage", 1,
+                        r"\section*{References}", 1,
                     )
                     suffix = "onefull" if add_support else "one"
                     self.assertIn(

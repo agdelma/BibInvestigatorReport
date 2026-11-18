@@ -63,6 +63,8 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 
 from .cleanup import cleanup_latex_artifacts, collect_latex_suffixes
+from .colors import COLLABORATION_BLUE
+from .network import write_coauthor_network
 from .summary import write_dot_summary
 
 try:
@@ -597,7 +599,7 @@ def color_for_investigator_count(n: int) -> str:
     if n <= 1:
         return "black"
     if n == 2:
-        return "blue"
+        return "invBlue"
     return "invOrange"
 
 
@@ -926,8 +928,8 @@ def generate_support_bibliography(
     )
 
     lines: list[str] = []
-    lines.append(r"\newpage")
-    lines.append(r"\section*{Supported Publications}")
+    lines.append(r"\clearpage")
+    lines.append(r"\section*{References}")
     if not has_included_keys:
         lines.append("None")
         return "\n".join(lines)
@@ -938,14 +940,10 @@ def generate_support_bibliography(
 
     for p in periods:
         period_end = p.end - dt.timedelta(days=1)
-        lines.append(r"\begin{center}")
         period_label = f"{p.label}: {p.start.isoformat()} -- {period_end.isoformat()}"
-        lines.append(rf"\Large\textbf{{{period_label}}}")
-        lines.append(r"\end{center}")
+        lines.append(rf"\subsection*{{{period_label}}}")
         for category in support_categories:
-            lines.append(r"\begin{center}")
-            lines.append(rf"\large\textbf{{{SUPPORT_LABELS[category]}}}")
-            lines.append(r"\end{center}")
+            lines.append(rf"\subsubsection*{{{SUPPORT_LABELS[category]}}}")
             keys = period_grouped[p.index].get(category, [])
             if not keys:
                 lines.append(r"\noindent None")
@@ -1039,6 +1037,7 @@ def generate_tex(
     summary_style: str = "table",
     summary_filename: str | None = None,
     summary_pages: int = 1,
+    network_filename: str | None = None,
 ) -> str:
     if summary_style not in {"table", "dots"}:
         raise ValueError(f"Unknown summary style: {summary_style}")
@@ -1062,10 +1061,11 @@ def generate_tex(
     lines.append(r"\usepackage[margin=1in]{geometry}")
     lines.append(r"\usepackage[hidelinks]{hyperref}")
     lines.append(r"\usepackage{xcolor}")
+    lines.append(rf"\definecolor{{invBlue}}{{HTML}}{{{COLLABORATION_BLUE.lstrip('#')}}}")
     lines.append(r"\definecolor{invOrange}{RGB}{255,130,0}")
     lines.append(r"\usepackage{array}")
     lines.append(r"\usepackage{longtable}")
-    if summary_style == "dots":
+    if summary_style == "dots" or network_filename:
         lines.append(r"\usepackage{graphicx}")
     lines.append(r"""
 % -------------------------------------------------------------------------------   
@@ -1100,6 +1100,11 @@ def generate_tex(
         lines.append(r"\usepackage{multibib}")
     else:
         lines.append(r"\usepackage{multibib}")
+    # Keep year/support headings within the final References section.
+    if add_support:
+        lines.append(r"\renewcommand{\bibsection}{}")
+    else:
+        lines.append(r"\renewcommand{\bibsection}{\subsection*{\refname}}")
 
     # multibib declarations: one per year, or one per year/support bucket.
     if add_support:
@@ -1115,14 +1120,14 @@ def generate_tex(
     lines.append("")
     lines.append(r"\begin{document}")
     lines.append("")
-    lines.append(r"\section*{IRG1 Investigator Publications by Project Year}")
     lines.append(
-        rf"\noindent Project date range: {start_date.isoformat()} $\to$ {end_date.isoformat()}\\"
+        r"\noindent{\Large\bfseries IRG1 Investigator Publications by Project Year\par}"
     )
+    lines.append(r"\medskip")
     lines.append(
-        r"\noindent Citation colors: black = 1 investigator on the paper, "
-        r"\textcolor{blue}{blue = 2}, \textcolor{invOrange}{orange = 3+}."
+        rf"\noindent Project date range: {start_date.isoformat()} $\to$ {end_date.isoformat()}\par"
     )
+    lines.append(r"\section{Summary}")
     lines.append("")
 
     # Summary at top; citations remain in the investigator sections in either mode.
@@ -1133,8 +1138,13 @@ def generate_tex(
                 rf"\noindent\includegraphics[page={page},width=\linewidth,"
                 rf"height=0.78\textheight,keepaspectratio]{{\detokenize{{{summary_filename}}}}}"
             )
-            lines.append(r"\clearpage")
+            if page < summary_pages:
+                lines.append(r"\clearpage")
     else:
+        lines.append(
+            r"\noindent Citation colors: black = 1 investigator on the paper, "
+            r"\textcolor{invBlue}{blue = 2}, \textcolor{invOrange}{orange = 3+}.\par"
+        )
         lines.append(generate_summary_longtable(
             investigators=investigators,
             periods=periods,
@@ -1144,8 +1154,21 @@ def generate_tex(
             add_support=add_support,
         ))
     lines.append("")
+    if network_filename:
+        lines.append(r"\clearpage")
+        lines.append(r"\subsection*{Co-authorship Network}")
+        lines.append(
+            r"\noindent\includegraphics[width=\linewidth,height=0.82\textheight,"
+            rf"keepaspectratio]{{\detokenize{{{network_filename}}}}}"
+        )
 
     # Investigator sections
+    lines.append(r"\clearpage")
+    lines.append(r"\section{Per-Investigator Products}")
+    lines.append(
+        r"\noindent Citation colors: black = 1 investigator on the paper, "
+        r"\textcolor{invBlue}{blue = 2}, \textcolor{invOrange}{orange = 3+}.\par\smallskip"
+    )
     full_support_keys = {
         entry.key for entry in entries if support_category_for_entry(entry) == SUPPORT_FULL
     }
@@ -1157,7 +1180,7 @@ def generate_tex(
     for inv_first, inv_last in investigators:
         inv_name = latex_escape(f"{inv_first} {inv_last}".strip())
         total = inv_total.get((inv_first, inv_last), 0)
-        lines.append(rf"\section*{{{inv_name} ({total})}}")
+        lines.append(rf"\subsection*{{{inv_name} ({total})}}")
         lines.append(r"\begin{itemize}")
 
         per_map = inv_to_period_keys.get((inv_first, inv_last), {})
@@ -1189,8 +1212,8 @@ def generate_tex(
                 bibliography_style=bibliography_style,
             ))
         else:
-            lines.append(r"\newpage")
-            lines.append(r"\section*{Yearly Bibliographies}")
+            lines.append(r"\clearpage")
+            lines.append(r"\section*{References}")
             lines.append("")
             for p in periods:
                 suffix = suffix_for_year(p.index)
@@ -1595,6 +1618,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     p.add_argument(
+        "--coauthor-network",
+        action="store_true",
+        help=(
+            "Include a co-authorship network of roster investigators in the Summary section. "
+            "Writes a companion PDF and requires the optional plots dependency."
+        ),
+    )
+    p.add_argument(
         "--date-field",
         default="auto",
         help=(
@@ -1736,6 +1767,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             entry_inv_count=entry_inv_count,
         )
 
+    network_pdf = None
+    if args.coauthor_network:
+        network_pdf = out_tex.with_name(f"{out_tex.stem}_coauthors.pdf")
+        write_coauthor_network(
+            path=network_pdf,
+            investigators=investigators,
+            periods=periods,
+            inv_to_period_keys=inv_to_period_keys,
+        )
+
     # Write TeX
     tex = generate_tex(
         entries=entries,
@@ -1754,6 +1795,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary_style=args.summary_style,
         summary_filename=summary_pdf.name if summary_pdf else None,
         summary_pages=summary_pages,
+        network_filename=network_pdf.name if network_pdf else None,
     )
     out_tex.write_text(tex, encoding="utf-8")
 
@@ -1811,6 +1853,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Wrote summary CSV: {summary_csv_path}")
     if summary_pdf is not None:
         print(f"Wrote summary figure: {summary_pdf}")
+    if network_pdf is not None:
+        print(f"Wrote co-authorship network: {network_pdf}")
     if args.compile or args.docx:
         print(f"Wrote PDF: {out_tex.with_suffix('.pdf')}")
     if args.docx:

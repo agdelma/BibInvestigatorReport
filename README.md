@@ -7,6 +7,7 @@ Generate a LaTeX report of BibTeX citations per investigator per project-year, p
   - a `.tex` report (organized by investigator and project-year)
   - `summary_pubs.csv` (investigators × years, with BibTeX keys per cell)
   - an optional dot-matrix summary PDF, automatically included in the `.tex` report
+  - an optional co-authorship network PDF, also included in the summary
   - optionally a compiled PDF (requires a LaTeX toolchain)
   - console diagnostics showing record totals and why any records were omitted
 
@@ -70,6 +71,7 @@ bibreport INPUT.bib investigators.csv \
   [--out report.tex] \
   [--summary-csv summary_pubs.csv] \
   [--summary-style table|dots] \
+  [--coauthor-network] \
   [--date-field auto|date|date-added|year|...] \
   [--bibliography-style plain|unsrt|abbrv|...] \
   [--add-support] \
@@ -86,6 +88,10 @@ bibreport INPUT.bib investigators.csv \
 - Year 02 is the next 12-month period, etc., until `--end-date`
 
 ### Visual publication summary
+
+The report is organized into **Summary**, **Per-Investigator Products**, and
+**References**. Each investigator has a subsection under Per-Investigator
+Products; the references retain their project-year and optional support groups.
 
 Use `--summary-style dots` to replace the opening citation table with a dot
 matrix and stacked yearly publication bars. Install the optional plotting
@@ -117,6 +123,29 @@ summary PDF. Word export continues to contain only the bibliographies.
 
 Use `--summary-style table` for the original citation table. This remains the
 default and does not require Matplotlib.
+
+### Co-authorship network
+
+Add `--coauthor-network` to include a second summary figure showing collaborations
+among the investigators in your CSV. It works with either summary style and uses
+the same optional `plots` dependency:
+
+```bash
+bibreport INPUT.bib investigators.csv \
+  --start-date 2023-05-01 --end-date 2026-11-30 \
+  --summary-style dots --coauthor-network --out report.tex --compile
+```
+
+Each node is an investigator, sized by their total number of included papers.
+Connections join investigators who share an included paper; line widths and
+labels show how many unique papers they share. A paper with three investigators
+contributes to each of its three pairs. Investigators without a shared paper
+remain visible, including those with no included papers. Coauthors outside the
+supplied roster are not shown.
+
+The script writes `report_coauthors.pdf` next to `report.tex` and automatically
+includes it within Summary. Keep this companion PDF with the `.tex` when moving
+the report. `--clean` preserves it.
 
 ### Inclusion logic
 

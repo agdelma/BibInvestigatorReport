@@ -146,7 +146,7 @@ class SummaryCliTests(unittest.TestCase):
         self.assertIn(r"\usepackage{graphicx}", tex)
         self.assertNotIn(r"\begin{longtable}", tex)
         self.assertEqual(tex.count(r"\citefour{included}"), 2)
-        self.assertIn(r"\section*{Jane Doe (1)}", tex)
+        self.assertIn(r"\subsection*{Jane Doe (1)}", tex)
         self.assertEqual((self.directory / "summary_pubs.csv").read_bytes(), original_csv)
         self.assertEqual(self.out.with_suffix(".pdf").read_bytes(), b"existing compiled report")
 
@@ -155,7 +155,7 @@ class SummaryCliTests(unittest.TestCase):
             tex = self.run_main("--summary-style", "dots", "--add-support", "--annual-report")
         self.assertEqual(tex.count(r"\citefourpartial{included}"), 2)
         self.assertIn(r"\renewcommand{\bibnumfmt}[1]{}", tex)
-        self.assertIn(r"\section*{Supported Publications}", tex)
+        self.assertIn(r"\section*{References}", tex)
         self.assertIn(r"\bibliographyfourpartial{input_support}", tex)
 
     def test_cleanup_preserves_summary_pdf_after_compilation(self):
